@@ -7,7 +7,20 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub path: String,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(default)]
+    pub memory: String,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptAttachment {
+    pub path: String,
+    pub name: String,
+    pub mime: Option<String>,
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +38,8 @@ pub struct ChatMessage {
     pub role: MessageRole,
     pub text: String,
     pub thought: String,
+    #[serde(default)]
+    pub attachments: Vec<PromptAttachment>,
     pub created_at: i64,
 }
 
@@ -58,11 +73,23 @@ pub struct ConversationTask {
     pub provider_id: String,
     pub model_id: String,
     pub reasoning_effort: String,
+    #[serde(default = "default_task_mode")]
+    pub mode: String,
+    #[serde(default = "default_approval_mode")]
+    pub approval_mode: String,
     pub engine_session_id: Option<String>,
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolActivity>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+fn default_task_mode() -> String {
+    "default".into()
+}
+
+fn default_approval_mode() -> String {
+    "ask".into()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -123,6 +150,34 @@ pub struct AgentEventPayload {
     pub data: Value,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileChange {
+    pub path: String,
+    pub status: String,
+    pub staged: bool,
+    pub unstaged: bool,
+    pub additions: usize,
+    pub deletions: usize,
+    pub patch: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSnapshot {
+    pub branch: String,
+    pub files: Vec<GitFileChange>,
+    pub clean: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalEventPayload {
+    pub task_id: String,
+    pub kind: String,
+    pub data: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TurnResult {
     pub text: String,
@@ -163,6 +218,10 @@ pub fn provider_catalog() -> Vec<ProviderDescriptor> {
                 "streaming".into(),
                 "tools".into(),
                 "permissions".into(),
+                "attachments".into(),
+                "images".into(),
+                "plan-mode".into(),
+                "fork".into(),
                 "resume".into(),
                 "models".into(),
             ],

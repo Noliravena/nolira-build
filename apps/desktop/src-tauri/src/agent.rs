@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -13,8 +14,8 @@ use tokio::sync::{oneshot, Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::domain::{
-    AgentEventPayload, AppSettings, ConversationTask, ModelOption, Project, ProviderDescriptor,
-    RuntimeInfo, ToolActivity, ToolStatus, TurnResult,
+    AgentEventPayload, AppSettings, ConversationTask, ModelOption, Project, PromptAttachment,
+    ProviderDescriptor, RuntimeInfo, ToolActivity, ToolStatus, TurnResult,
 };
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(120);
@@ -23,7 +24,13 @@ const PROMPT_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
 pub trait ProviderAdapter: Send + Sync {
     fn descriptor(&self) -> ProviderDescriptor;
     fn resolve_executable(&self, custom_path: Option<&str>) -> Result<PathBuf, String>;
-    fn command(&self, executable: &Path, cwd: &Path, model_id: Option<&str>) -> Command;
+    fn command(
+        &self,
+        executable: &Path,
+        cwd: &Path,
+        model_id: Option<&str>,
+        approval_mode: &str,
+    ) -> Command;
 }
 
 #[derive(Default)]
@@ -68,11 +75,20 @@ impl ProviderAdapter for GrokProvider {
         })
     }
 
-    fn command(&self, executable: &Path, cwd: &Path, model_id: Option<&str>) -> Command {
+    fn command(
+        &self,
+        executable: &Path,
+        cwd: &Path,
+        model_id: Option<&str>,
+        approval_mode: &str,
+    ) -> Command {
         let mut command = Command::new(executable);
         command.arg("agent");
         if let Some(model_id) = model_id.filter(|model| !model.is_empty()) {
             command.args(["--model", model_id]);
+        }
+        if approval_mode == "full_access" {
+            command.arg("--always-approve");
         }
         command
             .arg("stdio")
@@ -151,6 +167,7 @@ impl AgentManager {
             &executable,
             Path::new(&project.path),
             (!task.model_id.is_empty()).then_some(task.model_id.as_str()),
+            &task.approval_mode,
         );
         let connection = AcpConnection::spawn(
             app,
@@ -316,8 +333,11 @@ impl AcpConnection {
     pub async fn prompt(
         &self,
         prompt: &str,
+        attachments: &[PromptAttachment],
+        project: &Project,
         model_id: Option<&str>,
         effort: &str,
+        mode: &str,
     ) -> Result<TurnResult, String> {
         let session_id = self
             .engine_session_id()
@@ -338,16 +358,18 @@ impl AcpConnection {
         let mut metadata = json!({
             "reasoningEffort": effort,
             "x.ai/effort": effort,
+            "mode": mode,
         });
         if let Some(model_id) = model_id.filter(|value| !value.is_empty()) {
             metadata["modelId"] = json!(model_id);
         }
 
+        let prompt_blocks = build_prompt_blocks(prompt, attachments, project)?;
         self.request(
             "session/prompt",
             json!({
                 "sessionId": session_id,
-                "prompt": [{ "type": "text", "text": prompt }],
+                "prompt": prompt_blocks,
                 "_meta": metadata,
             }),
             PROMPT_TIMEOUT,
@@ -357,6 +379,31 @@ impl AcpConnection {
         let result = self.accumulator.lock().await.clone();
         self.emit("completed", json!({}));
         Ok(result)
+    }
+
+    pub async fn fork_session(&self, cwd: &str, model_id: Option<&str>) -> Result<String, String> {
+        let source_session_id = self
+            .engine_session_id()
+            .await
+            .ok_or_else(|| "Grok session is not ready".to_string())?;
+        let mut params = json!({
+            "sourceSessionId": source_session_id,
+            "sourceCwd": cwd,
+            "newCwd": cwd,
+            "sessionKind": "fork",
+        });
+        if let Some(model_id) = model_id.filter(|value| !value.is_empty()) {
+            params["newModelId"] = json!(model_id);
+        }
+        let result = self
+            .request("x.ai/session/fork", params, RPC_TIMEOUT)
+            .await?;
+        result
+            .get("newSessionId")
+            .or_else(|| result.pointer("/result/newSessionId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "Grok did not return a forked session id".to_string())
     }
 
     pub async fn resolve_permission(&self, request_id: &str, decision: &str) -> Result<(), String> {
@@ -391,6 +438,8 @@ impl AcpConnection {
                     RPC_TIMEOUT,
                 )
                 .await;
+        } else {
+            self.shutdown().await;
         }
         self.emit("cancelled", json!({}));
         Ok(())
@@ -753,6 +802,139 @@ fn value_string(value: &Value) -> String {
     })
 }
 
+fn build_prompt_blocks(
+    prompt: &str,
+    attachments: &[PromptAttachment],
+    project: &Project,
+) -> Result<Vec<Value>, String> {
+    let mut blocks = Vec::new();
+    let mut context = Vec::new();
+    if !project.instructions.trim().is_empty() {
+        context.push(format!(
+            "<project_instructions>\n{}\n</project_instructions>",
+            project.instructions.trim()
+        ));
+    }
+    if !project.memory.trim().is_empty() {
+        context.push(format!(
+            "<project_memory>\n{}\n</project_memory>",
+            project.memory.trim()
+        ));
+    }
+    if !context.is_empty() {
+        blocks.push(json!({ "type": "text", "text": context.join("\n\n") }));
+    }
+    if !prompt.trim().is_empty() {
+        blocks.push(json!({ "type": "text", "text": prompt.trim() }));
+    }
+
+    let mut binary_notes = Vec::new();
+    for attachment in attachments {
+        let path = Path::new(&attachment.path);
+        if !path.is_file() {
+            return Err(format!("attachment not found: {}", attachment.path));
+        }
+        let mime = attachment
+            .mime
+            .clone()
+            .or_else(|| {
+                mime_guess::from_path(path)
+                    .first()
+                    .map(|mime| mime.essence_str().to_string())
+            })
+            .unwrap_or_else(|| "application/octet-stream".into());
+
+        if mime.starts_with("image/") {
+            let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+            if bytes.len() > 8 * 1024 * 1024 {
+                return Err(format!("image too large (max 8MB): {}", attachment.name));
+            }
+            blocks.push(json!({
+                "type": "image",
+                "mimeType": mime,
+                "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+            }));
+        } else if is_text_attachment(path, &mime) {
+            let content = std::fs::read_to_string(path)
+                .map_err(|error| format!("cannot read {}: {error}", attachment.name))?;
+            let clipped = clip_utf8(&content, 200_000);
+            let suffix = (content.len() > clipped.len())
+                .then(|| format!("\n\n… [truncated, {} bytes total]", content.len()))
+                .unwrap_or_default();
+            blocks.push(json!({
+                "type": "text",
+                "text": format!(
+                    "Attached file `{}`:\n```\n{}{}\n```",
+                    attachment.name, clipped, suffix
+                )
+            }));
+        } else {
+            binary_notes.push(format!("{} ({mime})", attachment.path));
+        }
+    }
+
+    if !binary_notes.is_empty() {
+        blocks.push(json!({
+            "type": "text",
+            "text": format!(
+                "Attached files available on disk:\n{}",
+                binary_notes
+                    .iter()
+                    .map(|path| format!("- `{path}`"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        }));
+    }
+    if blocks.is_empty() {
+        return Err("prompt and attachments cannot both be empty".into());
+    }
+    Ok(blocks)
+}
+
+fn is_text_attachment(path: &Path, mime: &str) -> bool {
+    mime.starts_with("text/")
+        || matches!(
+            path.extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or(""),
+            "md" | "json"
+                | "toml"
+                | "yaml"
+                | "yml"
+                | "rs"
+                | "swift"
+                | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "py"
+                | "go"
+                | "java"
+                | "c"
+                | "cpp"
+                | "h"
+                | "css"
+                | "html"
+                | "txt"
+                | "csv"
+                | "sh"
+                | "sql"
+                | "xml"
+        )
+}
+
+fn clip_utf8(input: &str, max_bytes: usize) -> &str {
+    if input.len() <= max_bytes {
+        return input;
+    }
+    let mut end = max_bytes;
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    &input[..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -773,5 +955,12 @@ mod tests {
     fn maps_permission_outcomes() {
         assert_eq!(parse_numeric_id(Some(&json!(42))), Some(42));
         assert_eq!(parse_numeric_id(Some(&json!("7"))), Some(7));
+    }
+
+    #[test]
+    fn clips_utf8_without_splitting_characters() {
+        let input = "a你b";
+        assert_eq!(clip_utf8(input, 2), "a");
+        assert_eq!(clip_utf8(input, 4), "a你");
     }
 }

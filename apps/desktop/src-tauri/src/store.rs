@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     now_millis, suggested_title, AppSettings, ChatMessage, ConversationTask, MessageRole,
-    PersistedState, Project, TurnResult,
+    PersistedState, Project, PromptAttachment, TurnResult,
 };
 
 pub struct StateStore {
@@ -51,6 +51,8 @@ impl StateStore {
                 .unwrap_or(&path)
                 .to_string(),
             path,
+            instructions: String::new(),
+            memory: String::new(),
             created_at: now_millis(),
         };
         state.projects.push(project.clone());
@@ -75,8 +77,92 @@ impl StateStore {
             provider_id: "grok".into(),
             model_id: String::new(),
             reasoning_effort: "medium".into(),
+            mode: "default".into(),
+            approval_mode: "ask".into(),
             engine_session_id: None,
             messages: vec![],
+            tools: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        state.tasks.push(task.clone());
+        self.save(&state)?;
+        Ok(task)
+    }
+
+    pub async fn update_project_context(
+        &self,
+        project_id: &str,
+        instructions: &str,
+        memory: &str,
+    ) -> Result<Project, String> {
+        let mut state = self.inner.lock().await;
+        let project = state
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+            .ok_or("project not found")?;
+        project.instructions = instructions.trim().to_string();
+        project.memory = memory.trim().to_string();
+        let snapshot = project.clone();
+        self.save(&state)?;
+        Ok(snapshot)
+    }
+
+    pub async fn update_task_preferences(
+        &self,
+        task_id: &str,
+        model_id: &str,
+        effort: &str,
+        mode: &str,
+        approval_mode: &str,
+    ) -> Result<ConversationTask, String> {
+        if !["default", "plan"].contains(&mode) {
+            return Err("unsupported task mode".into());
+        }
+        if !["ask", "full_access"].contains(&approval_mode) {
+            return Err("unsupported approval mode".into());
+        }
+        let mut state = self.inner.lock().await;
+        let task = state
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == task_id)
+            .ok_or("task not found")?;
+        task.model_id = model_id.to_string();
+        task.reasoning_effort = effort.to_string();
+        task.mode = mode.to_string();
+        task.approval_mode = approval_mode.to_string();
+        task.updated_at = now_millis();
+        let snapshot = task.clone();
+        self.save(&state)?;
+        Ok(snapshot)
+    }
+
+    pub async fn fork_task(
+        &self,
+        source_task_id: &str,
+        engine_session_id: String,
+    ) -> Result<ConversationTask, String> {
+        let mut state = self.inner.lock().await;
+        let source = state
+            .tasks
+            .iter()
+            .find(|task| task.id == source_task_id)
+            .cloned()
+            .ok_or("task not found")?;
+        let now = now_millis();
+        let task = ConversationTask {
+            id: Uuid::new_v4().to_string(),
+            project_id: source.project_id,
+            title: format!("{} · fork", source.title),
+            provider_id: source.provider_id,
+            model_id: source.model_id,
+            reasoning_effort: source.reasoning_effort,
+            mode: source.mode,
+            approval_mode: source.approval_mode,
+            engine_session_id: (!engine_session_id.is_empty()).then_some(engine_session_id),
+            messages: source.messages,
             tools: vec![],
             created_at: now,
             updated_at: now,
@@ -135,6 +221,9 @@ impl StateStore {
         prompt: &str,
         model_id: &str,
         effort: &str,
+        mode: &str,
+        approval_mode: &str,
+        attachments: Vec<PromptAttachment>,
     ) -> Result<(ConversationTask, String), String> {
         let mut state = self.inner.lock().await;
         let task = state
@@ -147,12 +236,15 @@ impl StateStore {
         }
         task.model_id = model_id.to_string();
         task.reasoning_effort = effort.to_string();
+        task.mode = mode.to_string();
+        task.approval_mode = approval_mode.to_string();
         task.updated_at = now_millis();
         task.messages.push(ChatMessage {
             id: Uuid::new_v4().to_string(),
             role: MessageRole::User,
             text: prompt.to_string(),
             thought: String::new(),
+            attachments,
             created_at: now_millis(),
         });
         let assistant_id = Uuid::new_v4().to_string();
@@ -161,6 +253,7 @@ impl StateStore {
             role: MessageRole::Assistant,
             text: String::new(),
             thought: String::new(),
+            attachments: vec![],
             created_at: now_millis(),
         });
         let snapshot = task.clone();
@@ -297,7 +390,15 @@ mod tests {
             .unwrap();
         let task = store.create_task(&project.id).await.unwrap();
         let (updated, assistant_id) = store
-            .prepare_prompt(&task.id, "Inspect this repo", "", "medium")
+            .prepare_prompt(
+                &task.id,
+                "Inspect this repo",
+                "",
+                "medium",
+                "default",
+                "ask",
+                vec![],
+            )
             .await
             .unwrap();
         assert_eq!(updated.messages.len(), 2);
