@@ -2,12 +2,23 @@ export type MessageRole = 'user' | 'assistant' | 'system';
 export type ToolStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type TaskStatus = 'idle' | 'connecting' | 'streaming' | 'waiting_approval' | 'failed';
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+export type TaskMode = 'default' | 'plan';
+export type ApprovalMode = 'ask' | 'full_access';
 
 export interface Project {
   id: string;
   name: string;
   path: string;
+  instructions: string;
+  memory: string;
   createdAt: number;
+}
+
+export interface PromptAttachment {
+  path: string;
+  name: string;
+  mime?: string | null;
+  size?: number | null;
 }
 
 export interface ChatMessage {
@@ -15,6 +26,7 @@ export interface ChatMessage {
   role: MessageRole;
   text: string;
   thought: string;
+  attachments: PromptAttachment[];
   createdAt: number;
 }
 
@@ -34,6 +46,8 @@ export interface ConversationTask {
   providerId: string;
   modelId: string;
   reasoningEffort: ReasoningEffort;
+  mode: TaskMode;
+  approvalMode: ApprovalMode;
   engineSessionId?: string | null;
   messages: ChatMessage[];
   tools: ToolActivity[];
@@ -85,4 +99,33 @@ export interface PendingPermission {
   toolName: string;
   summary: string;
   detail?: string | null;
+}
+
+export interface GitFileChange {
+  path: string;
+  status: string;
+  staged: boolean;
+  unstaged: boolean;
+  additions: number;
+  deletions: number;
+  patch: string;
+}
+
+export interface GitSnapshot {
+  branch: string;
+  files: GitFileChange[];
+  clean: boolean;
+}
+
+export interface TerminalEvent {
+  taskId: string;
+  kind: 'output' | 'error' | 'exit';
+  data: string;
+}
+
+export interface Artifact {
+  id: string;
+  title: string;
+  language: string;
+  content: string;
 }

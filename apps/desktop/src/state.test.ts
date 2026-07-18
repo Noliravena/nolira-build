@@ -9,9 +9,9 @@ const task: ConversationTask = {
   providerId: 'grok',
   modelId: '',
   reasoningEffort: 'medium',
-  messages: [
-    { id: 'a', role: 'assistant', text: '', thought: '', createdAt: 1 },
-  ],
+  mode: 'default',
+  approvalMode: 'ask',
+  messages: [{ id: 'a', role: 'assistant', text: '', thought: '', attachments: [], createdAt: 1 }],
   tools: [],
   createdAt: 1,
   updatedAt: 1,
