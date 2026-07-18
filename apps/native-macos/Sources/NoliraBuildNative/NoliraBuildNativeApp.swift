@@ -22,12 +22,20 @@ struct NoliraBuildNativeApp: App {
                     .keyboardShortcut("o", modifiers: [.command])
             }
             CommandMenu("Workspace") {
+                Button("Review Working Tree") { store.reviewCurrentChanges() }
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+                Button("Fork Task") { store.forkSelectedTask() }
+                    .keyboardShortcut("f", modifiers: [.command, .shift])
+                Divider()
                 Button("Refresh Changes") { store.refreshGitSummary() }
                     .keyboardShortcut("g", modifiers: [.command, .shift])
                 Button(store.inspectorVisible ? "Hide Inspector" : "Show Inspector") {
                     store.inspectorVisible.toggle()
                 }
                 .keyboardShortcut("b", modifiers: [.command, .option])
+                Button("Project Context…") {
+                    if let project = store.selectedProject { store.openProjectContext(project.id) }
+                }
             }
         }
 

@@ -36,7 +36,10 @@ final class GrokACPClient: AgentProvider, @unchecked Sendable {
         let stderrPipe = Pipe()
 
         process.executableURL = executableURL
-        process.arguments = Self.processArguments(modelID: options.modelID)
+        process.arguments = Self.processArguments(
+            modelID: options.modelID,
+            approvalMode: options.approvalMode
+        )
         process.currentDirectoryURL = URL(fileURLWithPath: options.workingDirectory, isDirectory: true)
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
@@ -127,7 +130,14 @@ final class GrokACPClient: AgentProvider, @unchecked Sendable {
         emit(.ready(sessionID: sessionID, models: models))
     }
 
-    func send(prompt: String, modelID: String?, effort: ReasoningEffort) async throws {
+    func send(
+        prompt: String,
+        attachments: [PromptAttachment],
+        project: WorkspaceProject,
+        modelID: String?,
+        effort: ReasoningEffort,
+        mode: TaskMode
+    ) async throws {
         guard let sessionID = queue.sync(execute: { engineSessionID }) else {
             throw AgentProviderError.processUnavailable
         }
@@ -142,6 +152,7 @@ final class GrokACPClient: AgentProvider, @unchecked Sendable {
         var metadata: [String: Any] = [
             "reasoningEffort": effort.rawValue,
             "x.ai/effort": effort.rawValue,
+            "mode": mode.rawValue,
         ]
         if let modelID, !modelID.isEmpty {
             metadata["modelId"] = modelID
@@ -152,7 +163,11 @@ final class GrokACPClient: AgentProvider, @unchecked Sendable {
                 method: "session/prompt",
                 params: [
                     "sessionId": sessionID,
-                    "prompt": [["type": "text", "text": prompt]],
+                    "prompt": try Self.promptBlocks(
+                        prompt: prompt,
+                        attachments: attachments,
+                        project: project
+                    ),
                     "_meta": metadata,
                 ]
             )
@@ -163,8 +178,32 @@ final class GrokACPClient: AgentProvider, @unchecked Sendable {
         }
     }
 
+    func fork(workingDirectory: String, modelID: String?) async throws -> String {
+        guard let sourceSessionID = queue.sync(execute: { engineSessionID }) else {
+            throw AgentProviderError.processUnavailable
+        }
+        var params: [String: Any] = [
+            "sourceSessionId": sourceSessionID,
+            "sourceCwd": workingDirectory,
+            "newCwd": workingDirectory,
+            "sessionKind": "fork",
+        ]
+        if let modelID, !modelID.isEmpty { params["newModelId"] = modelID }
+        let result = try await request(method: "x.ai/session/fork", params: params)
+        if let sessionID = result["newSessionId"] as? String { return sessionID }
+        if let nested = result["result"] as? [String: Any],
+           let sessionID = nested["newSessionId"] as? String
+        {
+            return sessionID
+        }
+        throw AgentProviderError.invalidResponse("Grok did not return a forked session id")
+    }
+
     func cancel() async {
-        guard let sessionID = queue.sync(execute: { engineSessionID }) else { return }
+        guard let sessionID = queue.sync(execute: { engineSessionID }) else {
+            shutdown()
+            return
+        }
         _ = try? await request(
             method: "session/cancel",
             params: ["sessionId": sessionID]
@@ -360,13 +399,85 @@ final class GrokACPClient: AgentProvider, @unchecked Sendable {
         }
     }
 
-    private static func processArguments(modelID: String?) -> [String] {
+    private static func processArguments(
+        modelID: String?,
+        approvalMode: ApprovalMode
+    ) -> [String] {
         var arguments = ["agent"]
         if let modelID, !modelID.isEmpty {
             arguments.append(contentsOf: ["--model", modelID])
         }
+        if approvalMode == .fullAccess {
+            arguments.append("--always-approve")
+        }
         arguments.append("stdio")
         return arguments
+    }
+
+    private static func promptBlocks(
+        prompt: String,
+        attachments: [PromptAttachment],
+        project: WorkspaceProject
+    ) throws -> [[String: Any]] {
+        var blocks: [[String: Any]] = []
+        if !project.instructions.isEmpty {
+            blocks.append([
+                "type": "text",
+                "text": "Project instructions (follow these for this workspace):\n\(project.instructions)",
+            ])
+        }
+        if !project.memory.isEmpty {
+            blocks.append([
+                "type": "text",
+                "text": "Project memory (user-maintained context):\n\(project.memory)",
+            ])
+        }
+        if !prompt.isEmpty {
+            blocks.append(["type": "text", "text": prompt])
+        }
+
+        for attachment in attachments {
+            let url = URL(fileURLWithPath: attachment.path)
+            let data = try Data(contentsOf: url)
+            if attachment.mime?.hasPrefix("image/") == true {
+                guard data.count <= 8 * 1_024 * 1_024 else {
+                    throw AgentProviderError.invalidResponse(
+                        "Image \(attachment.name) exceeds the 8 MB Grok prompt limit"
+                    )
+                }
+                blocks.append([
+                    "type": "image",
+                    "mimeType": attachment.mime ?? "image/png",
+                    "data": data.base64EncodedString(),
+                ])
+            } else if isTextAttachment(attachment), let content = String(data: data, encoding: .utf8) {
+                blocks.append([
+                    "type": "text",
+                    "text": "Attached file: \(attachment.name)\nPath: \(attachment.path)\n\n\(content.prefix(200_000))",
+                ])
+            } else {
+                blocks.append([
+                    "type": "text",
+                    "text": "Attached binary file: \(attachment.name)\nPath: \(attachment.path)",
+                ])
+            }
+        }
+        return blocks
+    }
+
+    private static func isTextAttachment(_ attachment: PromptAttachment) -> Bool {
+        if attachment.mime?.hasPrefix("text/") == true { return true }
+        if let mime = attachment.mime,
+           ["application/json", "application/xml", "application/javascript"].contains(mime)
+        {
+            return true
+        }
+        let extensions: Set<String> = [
+            "c", "cc", "cpp", "css", "go", "h", "hpp", "html", "java", "js", "json",
+            "kt", "md", "mjs", "py", "rb", "rs", "sh", "sql", "swift", "toml", "ts",
+            "tsx", "txt", "xml", "yaml", "yml",
+        ]
+        return extensions.contains(URL(fileURLWithPath: attachment.path).pathExtension.lowercased())
     }
 
     private static func resolveExecutable(customPath: String?) throws -> URL {

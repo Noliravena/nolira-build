@@ -8,8 +8,13 @@ Native macOS prototype for a Grok-first coding workspace. It uses SwiftUI for th
 - Real `grok agent stdio` sessions, streaming messages, thoughts, plans, and tool calls
 - Interactive allow-once, allow-for-session, and deny decisions
 - Model and reasoning-effort controls
+- Build/Plan mode, approval policy, and server-side Grok forks with an isolated local-context fallback for older CLIs
+- Project-scoped instructions and memory
+- Text and image attachments encoded as ACP content blocks
 - Grok session resume after relaunch
-- Git change viewer and a project-scoped command runner
+- Git change viewer with stage/unstage-all and review workflow
+- Persistent project shell per task
+- Sandboxed HTML/SVG artifact previews with copy and save
 - Provider catalog designed around capabilities instead of Grok-specific UI state
 
 ## Run

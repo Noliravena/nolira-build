@@ -4,6 +4,7 @@ struct AgentConnectionOptions {
     let workingDirectory: String
     let existingSessionID: String?
     let modelID: String?
+    let approvalMode: ApprovalMode
     let customExecutablePath: String?
 }
 
@@ -12,7 +13,15 @@ protocol AgentProvider: AnyObject {
     var isConnected: Bool { get }
 
     func connect(options: AgentConnectionOptions) async throws
-    func send(prompt: String, modelID: String?, effort: ReasoningEffort) async throws
+    func send(
+        prompt: String,
+        attachments: [PromptAttachment],
+        project: WorkspaceProject,
+        modelID: String?,
+        effort: ReasoningEffort,
+        mode: TaskMode
+    ) async throws
+    func fork(workingDirectory: String, modelID: String?) async throws -> String
     func cancel() async
     func resolvePermission(id: String, decision: PermissionDecision) async throws
     func shutdown()
@@ -24,7 +33,10 @@ enum ProviderCatalog {
         name: "Grok Build",
         detail: "Local Grok CLI over Agent Client Protocol",
         transport: "ACP · stdio",
-        capabilities: [.streaming, .tools, .permissions, .resume, .models],
+        capabilities: [
+            .streaming, .tools, .permissions, .attachments, .images,
+            .planMode, .fork, .artifacts, .resume, .models,
+        ],
         isAvailable: true
     )
 
@@ -60,5 +72,10 @@ enum AgentProviderError: LocalizedError {
         case .disconnected:
             "The Grok agent process exited."
         }
+    }
+
+    var isMethodNotFound: Bool {
+        guard case let .rpc(code, message) = self else { return false }
+        return code == -32601 || message.localizedCaseInsensitiveContains("method not found")
     }
 }
