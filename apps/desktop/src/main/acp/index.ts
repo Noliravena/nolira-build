@@ -1,0 +1,6 @@
+export { buildPromptBlocks } from './attachments'
+export { GrokAcpClient, mapPermissionRequest, parseModels } from './client'
+export { GrokAcpError, GrokAcpTimeoutError } from './errors'
+export { resolveGrokExecutable } from './executable'
+export { parseJsonRpcLine } from './jsonrpc'
+export { GrokAcpManager } from './manager'
