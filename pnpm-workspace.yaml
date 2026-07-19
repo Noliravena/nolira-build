@@ -1,3 +1,9 @@
 packages:
   - "apps/*"
   - "packages/*"
+
+# Electron and Vite both install platform-specific executables. pnpm 10 blocks
+# dependency build scripts unless they are explicitly allow-listed.
+onlyBuiltDependencies:
+  - electron
+  - esbuild
