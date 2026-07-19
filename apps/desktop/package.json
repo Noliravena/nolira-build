@@ -1,0 +1,45 @@
+{
+  "name": "@nolirabuild/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cross-platform Grok ACP coding workspace",
+  "license": "UNLICENSED",
+  "author": "Nolira Build contributors",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "lint": "pnpm typecheck",
+    "test": "pnpm typecheck && vitest run",
+    "test:acp-live": "NOLIRA_LIVE_ACP=1 vitest run src/main/acp/acp.live.test.ts",
+    "preview": "electron-vite preview",
+    "package:dir": "pnpm build && electron-builder --dir",
+    "dist": "pnpm build && electron-builder",
+    "dist:mac": "pnpm build && electron-builder --mac",
+    "dist:win": "pnpm build && electron-builder --win",
+    "dist:linux": "pnpm build && electron-builder --linux",
+    "clean": "rm -rf out release"
+  },
+  "dependencies": {
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "@types/react": "^19.1.16",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.3",
+    "electron": "^39.2.7",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^4.0.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

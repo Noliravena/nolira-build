@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
+  <title id="title">Nolira Build application icon source</title>
+  <defs>
+    <linearGradient id="surface" x1="128" y1="96" x2="896" y2="928" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#292A2D"/>
+      <stop offset="1" stop-color="#101113"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="296" y1="310" x2="738" y2="738" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F5F5F2"/>
+      <stop offset="1" stop-color="#A6A7AA"/>
+    </linearGradient>
+  </defs>
+  <rect x="52" y="52" width="920" height="920" rx="224" fill="url(#surface)"/>
+  <path d="M297 708V316h80l270 259V316h80v392h-74L377 443v265h-80Z" fill="url(#accent)"/>
+  <circle cx="741" cy="287" r="36" fill="#E8FF65"/>
+</svg>
