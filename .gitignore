@@ -1,34 +1,62 @@
-# Dependencies
-node_modules
-.pnpm-store
+# ── Dependencies ──────────────────────────────────────────
+node_modules/
+.pnpm-store/
+.pnpm-debug.log*
 
-# Build
-dist
-build
-.next
-.turbo
-out
-release
+# ── Build outputs ─────────────────────────────────────────
+dist/
+build/
+out/
+release/
+.next/
+.turbo/
 *.tsbuildinfo
 **/.build/
 **/target/
 
-# Env
+# Electron / electron-builder artifacts
+*.app/
+*.dmg
+*.blockmap
+*.exe
+*.AppImage
+*.snap
+*.deb
+*.rpm
+
+# ── Environment ───────────────────────────────────────────
 .env
 .env.*
 !.env.example
+!.env.*.example
 
-# IDE / OS
-.DS_Store
-.idea
+# ── IDE / Editor ──────────────────────────────────────────
+.idea/
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
+*.swp
+*.swo
+*~
 
-# Logs / coverage
+# ── OS ────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+
+# ── Logs / coverage / caches ──────────────────────────────
 *.log
-coverage
-.nyc_output
+logs/
+coverage/
+.nyc_output/
+.cache/
+.eslintcache
+.stylelintcache
 
-# Misc
+# ── Local / temporary ─────────────────────────────────────
 *.local
+tmp/
+temp/
+*.tmp
