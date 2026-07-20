@@ -18,7 +18,7 @@ From the repository root:
 
 ```bash
 pnpm install
-pnpm --filter @nolirabuild/desktop dev
+pnpm --filter @nolira-build/desktop dev
 ```
 
 By default the application resolves `grok` from the user's configured path, `~/.grok/bin`, or `PATH`. Project and task metadata are stored as JSON below Electron's per-user `userData` directory; credentials and Grok's own session data remain owned by the Grok CLI.
@@ -37,9 +37,9 @@ Workspace file APIs resolve symlinks and reject paths outside an approved reposi
 ## Packaging
 
 ```bash
-pnpm --filter @nolirabuild/desktop dist:mac
-pnpm --filter @nolirabuild/desktop dist:win
-pnpm --filter @nolirabuild/desktop dist:linux
+pnpm --filter @nolira-build/desktop dist:mac
+pnpm --filter @nolira-build/desktop dist:win
+pnpm --filter @nolira-build/desktop dist:linux
 ```
 
 Configured outputs are DMG/ZIP on macOS, NSIS/portable on Windows, and AppImage/DEB on Linux. Cross-building platform installers is not guaranteed; release CI should build and sign each target on its native runner.

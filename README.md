@@ -30,7 +30,7 @@ packages/      # Shared monorepo packages
 
 ```bash
 pnpm install
-pnpm --filter @nolirabuild/desktop dev
+pnpm --filter @nolira-build/desktop dev
 ```
 
 ## Scripts
@@ -41,9 +41,9 @@ pnpm --filter @nolirabuild/desktop dev
 | `pnpm dev` | Start development tasks |
 | `pnpm lint` | Run static checks |
 | `pnpm test` | Run tests |
-| `pnpm --filter @nolirabuild/desktop dist:mac` | Package macOS builds |
-| `pnpm --filter @nolirabuild/desktop dist:win` | Package Windows builds |
-| `pnpm --filter @nolirabuild/desktop dist:linux` | Package Linux builds |
+| `pnpm --filter @nolira-build/desktop dist:mac` | Package macOS builds |
+| `pnpm --filter @nolira-build/desktop dist:win` | Package Windows builds |
+| `pnpm --filter @nolira-build/desktop dist:linux` | Package Linux builds |
 
 See [apps/desktop/README.md](apps/desktop/README.md) for the capability map,
 runtime discovery, security boundaries, and packaging notes. Third-party
