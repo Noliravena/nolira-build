@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent as ReactClipboardEvent,
   type KeyboardEvent,
   type ReactNode,
 } from "react"
@@ -17,19 +18,29 @@ import {
   type AppSettings,
   type AppSnapshot,
   type Attachment,
+  type AutomationDefinition,
   type ChatMessage,
   type EffortLevel,
+  type InboxItem,
+  type McpServerConfig,
   type MessagePart,
   type PermissionMode,
   type PermissionRequest,
   type Project,
+  type ProviderSummary,
   type RuntimeStatus,
+  type SkillSummary,
   type Task,
   type ToolPart,
+  type WorkspaceChange,
+  type WorkspaceDiff,
+  type WorkspaceFile,
+  type WorkspaceFileContent,
+  type WorkspaceMemory,
 } from "./types"
 
-type Screen = "workspace" | "settings"
-type SettingsSection = "general" | "runtime" | "appearance"
+type Screen = "workspace" | "settings" | "inbox"
+type SettingsSection = "general" | "runtime" | "appearance" | "integrations"
 
 const SIDEBAR_MODES = [
   {
@@ -47,6 +58,75 @@ const SIDEBAR_MODES = [
 ] as const
 
 const ACTIVE_SIDEBAR_MODE_INDEX = 1
+
+interface ComposerCommand {
+  name: string
+  description: string
+  prompt: string
+}
+
+const COMPOSER_COMMANDS: ComposerCommand[] = [
+  {
+    name: "plan",
+    description: "Plan the work before editing",
+    prompt:
+      "Create a concise implementation plan first. Do not modify files until I approve the plan. ",
+  },
+  {
+    name: "review",
+    description: "Review the current changes",
+    prompt:
+      "Review the current changes for correctness, regressions, security issues, and missing tests. Lead with actionable findings. ",
+  },
+  {
+    name: "test",
+    description: "Run the relevant checks",
+    prompt:
+      "Run the relevant tests and checks for this change. Diagnose any failures and report the exact verification performed. ",
+  },
+  {
+    name: "fix",
+    description: "Diagnose and implement a fix",
+    prompt:
+      "Diagnose the root cause, implement the smallest complete fix, and verify it with relevant tests. ",
+  },
+  {
+    name: "explain",
+    description: "Explain selected code or behavior",
+    prompt:
+      "Explain this clearly, including the important control flow, assumptions, and likely pitfalls. ",
+  },
+  {
+    name: "init",
+    description: "Orient to this repository",
+    prompt:
+      "Inspect this repository and summarize its architecture, development workflow, and the safest place to make the requested change. ",
+  },
+  {
+    name: "goal",
+    description: "Create a persistent execution goal",
+    prompt:
+      "Create a persistent goal for the following objective and keep working toward it across turns until it is complete or genuinely blocked: ",
+  },
+  {
+    name: "monitor",
+    description: "Run and monitor a background check",
+    prompt:
+      "Start the following check as a background monitor. Report meaningful state changes and wake this session when attention is needed: ",
+  },
+]
+
+type ComposerTrigger = {
+  marker: "@" | "/"
+  query: string
+  start: number
+  end: number
+}
+
+type ComposerSuggestion =
+  | { id: string; kind: "file"; file: WorkspaceFile }
+  | { id: string; kind: "command"; command: ComposerCommand }
+  | { id: string; kind: "skill"; skill: SkillSummary }
 
 const DEMO_DATE = "2026-07-20T09:30:00.000Z"
 
@@ -249,6 +329,14 @@ function formatBytes(size?: number) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 
+function formatDuration(milliseconds: number) {
+  if (milliseconds < 1_000) return `${Math.round(milliseconds)} ms`
+  if (milliseconds < 60_000) return `${Math.round(milliseconds / 1_000)} sec`
+  const minutes = Math.floor(milliseconds / 60_000)
+  const seconds = Math.round((milliseconds % 60_000) / 1_000)
+  return seconds > 0 ? `${minutes} min ${seconds} sec` : `${minutes} min`
+}
+
 function isMac(platform: string) {
   return platform === "darwin" || platform.toLowerCase().includes("mac")
 }
@@ -258,6 +346,42 @@ function messageText(message: ChatMessage) {
     .filter((part) => part.type === "text")
     .map((part) => (part.type === "text" ? part.text : ""))
     .join("\n")
+}
+
+function composerTriggerAt(text: string, cursor: number): ComposerTrigger | null {
+  const beforeCursor = text.slice(0, cursor)
+  const match = beforeCursor.match(/(^|\s)([@/])([^\s@/]*)$/)
+  if (!match || (match[2] !== "@" && match[2] !== "/")) return null
+  const query = match[3] ?? ""
+  return {
+    marker: match[2],
+    query,
+    start: cursor - query.length - 1,
+    end: cursor,
+  }
+}
+
+function fileAsAttachment(file: WorkspaceFile): Attachment {
+  return {
+    name: file.name,
+    path: file.path,
+    mimeType: file.mimeType,
+    size: file.size,
+  }
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read image"))
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : ""
+      const separator = result.indexOf(",")
+      if (separator < 0) reject(new Error("Clipboard image data is invalid"))
+      else resolve(result.slice(separator + 1))
+    }
+    reader.readAsDataURL(file)
+  })
 }
 
 export function App() {
@@ -286,6 +410,7 @@ export function App() {
     canGoForward: false,
   })
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
+  const [inbox, setInbox] = useState<InboxItem[]>([])
   const [screen, setScreen] = useState<Screen>("workspace")
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [activityOpen, setActivityOpen] = useState(false)
@@ -350,6 +475,7 @@ export function App() {
           setActivityOpen(event.payload.settings.showActivityPanel)
           setRuntime(event.payload.runtime)
           setModels(event.payload.models ?? [])
+          setInbox(event.payload.inbox ?? [])
           setActiveTaskId(
             event.payload.activeTaskId ?? event.payload.tasks[0]?.id ?? null,
           )
@@ -394,6 +520,11 @@ export function App() {
         case "models.updated":
           setModels(event.payload)
           break
+        case "sessions.indexed":
+          break
+        case "inbox.updated":
+          setInbox(event.payload)
+          break
         case "error":
           showToast(event.payload.message)
           break
@@ -420,6 +551,7 @@ export function App() {
         setActivityOpen(snapshot.settings.showActivityPanel)
         setRuntime(snapshot.runtime)
         setModels(snapshot.models ?? [])
+        setInbox(snapshot.inbox ?? [])
         setActiveTaskId(
           snapshot.activeTaskId ?? snapshot.tasks[0]?.id ?? null,
         )
@@ -547,6 +679,147 @@ export function App() {
     [activeProject?.id, addProject, api, selectTask, settings, showToast],
   )
 
+  const refreshSessions = useCallback(async () => {
+    if (!api) return
+    try {
+      const response = await api.invoke("sessions.refresh", {
+        includeArchived: true,
+      })
+      if (!response.ok) throw new Error(response.error.message)
+      setTasks((current) =>
+        response.data.tasks.reduce(upsertTask, current),
+      )
+      showToast(
+        response.data.sessions.length === 1
+          ? "1 Grok session refreshed"
+          : `${response.data.sessions.length} Grok sessions refreshed`,
+      )
+    } catch (error) {
+      showToast(
+        error instanceof Error ? error.message : "Could not refresh sessions",
+      )
+    }
+  }, [api, showToast])
+
+  const continueRecentSession = useCallback(async () => {
+    if (!api) {
+      showToast("Session history is available in the desktop app")
+      return
+    }
+    try {
+      const response = await api.invoke("sessions.continueRecent", {
+        projectId: activeProject?.id,
+      })
+      if (!response.ok) throw new Error(response.error.message)
+      if (!response.data.task) {
+        showToast("No Grok session found for this repository")
+        return
+      }
+      setTasks((current) => upsertTask(current, response.data.task!))
+      await selectTask(response.data.task.id)
+    } catch (error) {
+      showToast(
+        error instanceof Error ? error.message : "Could not continue session",
+      )
+    }
+  }, [activeProject?.id, api, selectTask, showToast])
+
+  const renameSession = useCallback(
+    async (task: Task) => {
+      if (!api || !task.sessionId) return
+      const title = window.prompt("Rename session", task.title)?.trim()
+      if (!title || title === task.title) return
+      try {
+        const response = await api.invoke("sessions.rename", {
+          sessionId: task.sessionId,
+          title,
+        })
+        if (!response.ok) throw new Error(response.error.message)
+        setTasks((current) => upsertTask(current, response.data.task))
+      } catch (error) {
+        showToast(
+          error instanceof Error ? error.message : "Could not rename session",
+        )
+      }
+    },
+    [api, showToast],
+  )
+
+  const archiveSession = useCallback(
+    async (task: Task) => {
+      if (!api || !task.sessionId) return
+      const archived = !task.archived
+      try {
+        const response = await api.invoke("sessions.archive", {
+          sessionId: task.sessionId,
+          archived,
+        })
+        if (!response.ok) throw new Error(response.error.message)
+        setTasks((current) => upsertTask(current, response.data.task))
+        if (archived && activeTaskId === task.id) {
+          const fallback = tasks.find(
+            (candidate) => candidate.id !== task.id && !candidate.archived,
+          )
+          if (fallback) await selectTask(fallback.id)
+          else setActiveTaskId(null)
+        }
+        showToast(archived ? "Session archived" : "Session restored")
+      } catch (error) {
+        showToast(
+          error instanceof Error ? error.message : "Could not archive session",
+        )
+      }
+    },
+    [activeTaskId, api, selectTask, showToast, tasks],
+  )
+
+  const exportSession = useCallback(
+    async (task: Task) => {
+      if (!api || !task.sessionId) return
+      try {
+        const response = await api.invoke("sessions.exportMarkdown", {
+          sessionId: task.sessionId,
+        })
+        if (!response.ok) throw new Error(response.error.message)
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(response.data.markdown)
+          showToast(`Copied ${response.data.suggestedName}`)
+        } else {
+          window.prompt("Copy session Markdown", response.data.markdown)
+        }
+      } catch (error) {
+        showToast(
+          error instanceof Error ? error.message : "Could not export session",
+        )
+      }
+    },
+    [api, showToast],
+  )
+
+  const updateInbox = useCallback(
+    async (
+      method: "inbox.markRead" | "inbox.markAllRead" | "inbox.dismiss",
+      params: { id: string; read?: boolean } | Record<string, never>,
+    ) => {
+      if (!api) return
+      try {
+        const response =
+          method === "inbox.markRead"
+            ? await api.invoke(method, params as { id: string; read?: boolean })
+            : method === "inbox.dismiss"
+              ? await api.invoke(method, params as { id: string })
+              : await api.invoke(method, {})
+        if (!response.ok) throw new Error(response.error.message)
+        setInbox(response.data.items)
+      } catch (error) {
+        showToast(
+          error instanceof Error ? error.message : "Could not update inbox",
+        )
+      }
+    },
+    [api, showToast],
+  )
+
   const updateSettings = useCallback(
     async (patch: Partial<AppSettings>) => {
       const previous = settings
@@ -601,13 +874,20 @@ export function App() {
           onCreateTask={createTask}
           onGoBack={() => navigateTaskHistory(-1)}
           onGoForward={() => navigateTaskHistory(1)}
+          onContinueRecent={continueRecentSession}
+          onRefreshSessions={refreshSessions}
+          onRenameSession={renameSession}
+          onArchiveSession={archiveSession}
+          onExportSession={exportSession}
           onOpenSettings={() => setScreen("settings")}
+          onOpenInbox={() => setScreen("inbox")}
           onSelectTask={selectTask}
           onToggleSidebar={() => setSidebarOpen(false)}
           platform={platform}
           projects={projects}
           runtime={runtime}
           tasks={tasks}
+          unreadInboxCount={inbox.filter((item) => !item.read).length}
         />
       )}
 
@@ -615,10 +895,28 @@ export function App() {
         {screen === "settings" ? (
           <SettingsView
             onBack={() => setScreen("workspace")}
+            onNotify={showToast}
             onUpdate={updateSettings}
             platform={platform}
+            projects={projects}
             runtime={runtime}
             settings={settings}
+            sidebarOpen={sidebarOpen}
+            toggleSidebar={() => setSidebarOpen((open) => !open)}
+          />
+        ) : screen === "inbox" ? (
+          <InboxView
+            inbox={inbox}
+            onBack={() => setScreen("workspace")}
+            onDismiss={(id) => void updateInbox("inbox.dismiss", { id })}
+            onMarkAllRead={() => void updateInbox("inbox.markAllRead", {})}
+            onOpenItem={(item) => {
+              if (!item.read) {
+                void updateInbox("inbox.markRead", { id: item.id, read: true })
+              }
+              if (item.taskId) void selectTask(item.taskId)
+            }}
+            platform={platform}
             sidebarOpen={sidebarOpen}
             toggleSidebar={() => setSidebarOpen((open) => !open)}
           />
@@ -659,6 +957,7 @@ export function App() {
                 project={activeProject}
                 runtime={runtime}
                 task={activeTask}
+                onNotify={showToast}
               />
             )}
           </div>
@@ -740,13 +1039,20 @@ interface SidebarProps {
   canGoBack: boolean
   canGoForward: boolean
   runtime: RuntimeStatus
+  unreadInboxCount: number
   platform: string
   onSelectTask: (id: string) => void
   onCreateTask: (projectId?: string) => void
   onGoBack: () => void
   onGoForward: () => void
+  onContinueRecent: () => void
+  onRefreshSessions: () => void
+  onRenameSession: (task: Task) => void
+  onArchiveSession: (task: Task) => void
+  onExportSession: (task: Task) => void
   onAddProject: () => void
   onOpenSettings: () => void
+  onOpenInbox: () => void
   onToggleSidebar: () => void
 }
 
@@ -757,18 +1063,32 @@ function Sidebar({
   canGoBack,
   canGoForward,
   runtime,
+  unreadInboxCount,
   platform,
   onSelectTask,
   onCreateTask,
   onGoBack,
   onGoForward,
+  onContinueRecent,
+  onRefreshSessions,
+  onRenameSession,
+  onArchiveSession,
+  onExportSession,
   onAddProject,
   onOpenSettings,
+  onOpenInbox,
   onToggleSidebar,
 }: SidebarProps) {
   const [query, setQuery] = useState("")
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [showArchived, setShowArchived] = useState(false)
+  const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(
+    () => new Set(),
+  )
+  const [expandedTaskProjectIds, setExpandedTaskProjectIds] = useState<
+    Set<string>
+  >(() => new Set())
   const [activeModeIndex, setActiveModeIndex] = useState(
     ACTIVE_SIDEBAR_MODE_INDEX,
   )
@@ -779,20 +1099,78 @@ function Sidebar({
   const searchInputRef = useRef<HTMLInputElement>(null)
   const normalizedQuery = query.trim().toLowerCase()
   const projectMap = new Map(projects.map((project) => [project.id, project]))
-  const filteredTasks = [...tasks]
-    .filter((task) => {
-      if (!normalizedQuery) return true
-      const project = projectMap.get(task.projectId)
-      return `${task.title} ${project?.name ?? ""}`
-        .toLowerCase()
-        .includes(normalizedQuery)
-    })
+  const archivedCount = tasks.filter((task) => task.archived).length
+  const activeTask = tasks.find((task) => task.id === activeTaskId)
+  const activeProjectId = activeTask?.projectId ?? null
+  const visibleTasks = [...tasks]
+    .filter((task) => (showArchived ? Boolean(task.archived) : !task.archived))
     .sort(
       (a, b) =>
         new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
     )
+  const taskMatchesQuery = (task: Task) => {
+    if (!normalizedQuery) return true
+    const project = projectMap.get(task.projectId)
+    return `${task.title} ${project?.name ?? ""}`
+      .toLowerCase()
+      .includes(normalizedQuery)
+  }
+  const pinnedTasks = visibleTasks.filter(
+    (task) => task.pinned && taskMatchesQuery(task),
+  )
+  const visibleProjects = projects.filter((project) => {
+    const projectMatches = project.name.toLowerCase().includes(normalizedQuery)
+    const projectTasks = visibleTasks.filter(
+      (task) => task.projectId === project.id,
+    )
+
+    if (!normalizedQuery) {
+      return !showArchived || projectTasks.length > 0
+    }
+
+    return (
+      projectMatches ||
+      projectTasks.some((task) =>
+        task.title.toLowerCase().includes(normalizedQuery),
+      )
+    )
+  })
+  const unassignedTasks = visibleTasks.filter(
+    (task) =>
+      !task.pinned &&
+      !projectMap.has(task.projectId) &&
+      taskMatchesQuery(task),
+  )
 
   const selectedMode = SIDEBAR_MODES[ACTIVE_SIDEBAR_MODE_INDEX]
+
+  useEffect(() => {
+    if (!activeProjectId) return
+    setCollapsedProjectIds((current) => {
+      if (!current.has(activeProjectId)) return current
+      const next = new Set(current)
+      next.delete(activeProjectId)
+      return next
+    })
+  }, [activeProjectId])
+
+  const toggleProject = (projectId: string) => {
+    setCollapsedProjectIds((current) => {
+      const next = new Set(current)
+      if (next.has(projectId)) next.delete(projectId)
+      else next.add(projectId)
+      return next
+    })
+  }
+
+  const toggleProjectTaskLimit = (projectId: string) => {
+    setExpandedTaskProjectIds((current) => {
+      const next = new Set(current)
+      if (next.has(projectId)) next.delete(projectId)
+      else next.add(projectId)
+      return next
+    })
+  }
 
   const closeModeMenu = useCallback((restoreFocus = false) => {
     setModeMenuOpen(false)
@@ -993,10 +1371,12 @@ function Sidebar({
           className={`icon-button sidebar-search-toggle no-drag ${
             searchOpen ? "active" : ""
           }`}
-          aria-label={searchOpen ? "Close workspace search" : "Search workspaces"}
+          aria-label={
+            searchOpen ? "Close sidebar search" : "Search projects and chats"
+          }
           aria-controls="sidebar-search-panel"
           aria-expanded={searchOpen}
-          title={searchOpen ? "Close search" : "Search workspaces"}
+          title={searchOpen ? "Close search" : "Search projects and chats"}
           onClick={() => {
             closeModeMenu()
             if (searchOpen) closeSearch(false)
@@ -1013,19 +1393,19 @@ function Sidebar({
             <Icon name="search" size={16} />
             <input
               ref={searchInputRef}
-              aria-label="Search workspaces"
+              aria-label="Search projects and chats"
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Escape") closeSearch()
               }}
-              placeholder="Search workspaces..."
+              placeholder="Search projects and chats..."
               value={query}
             />
             <button
               type="button"
               className="sidebar-search-clear"
               onClick={() => closeSearch()}
-              aria-label="Close workspace search"
+              aria-label="Close sidebar search"
               title="Close search"
             >
               <Icon name="close" size={14} />
@@ -1037,68 +1417,468 @@ function Sidebar({
           className="new-task-button"
           onClick={() => onCreateTask()}
         >
-          <Icon name="add" size={18} />
-          <span>New Workspace</span>
+          <Icon name="compose" size={18} />
+          <span>New chat</span>
           <kbd>{isMac(platform) ? "⌘N" : "Ctrl N"}</kbd>
+        </button>
+        <button
+          type="button"
+          className="continue-session-button"
+          onClick={onContinueRecent}
+        >
+          <Icon name="play" size={16} />
+          <span>Continue recent session</span>
+        </button>
+        <button
+          type="button"
+          className="sidebar-nav-button"
+          onClick={onOpenInbox}
+        >
+          <Icon name="inbox" size={17} />
+          <span>Inbox</span>
+          {unreadInboxCount > 0 && (
+            <span className="inbox-unread-badge">
+              {unreadInboxCount > 99 ? "99+" : unreadInboxCount}
+            </span>
+          )}
         </button>
       </div>
 
       <div className="workspace-list">
-        <div className="workspace-section-title">Workspaces</div>
-        <div className="task-list">
-          {filteredTasks.map((task) => {
-            const project = projectMap.get(task.projectId)
-            return (
+        {pinnedTasks.length > 0 && (
+          <section className="sidebar-content-section sidebar-pinned-section">
+            <div className="workspace-section-title">
+              <span>Pinned</span>
+            </div>
+            <div className="task-list sidebar-flat-task-list">
+              {pinnedTasks.map((task) => {
+                const project = projectMap.get(task.projectId)
+                return (
+                  <SidebarTaskRow
+                    active={task.id === activeTaskId}
+                    compact
+                    key={task.id}
+                    onArchive={() => onArchiveSession(task)}
+                    onExport={() => onExportSession(task)}
+                    onRename={() => onRenameSession(task)}
+                    onSelect={() => onSelectTask(task.id)}
+                    project={project}
+                    task={task}
+                  />
+                )
+              })}
+            </div>
+          </section>
+        )}
+
+        <section className="sidebar-content-section sidebar-projects-section">
+          <div className="workspace-section-title">
+            <span>{showArchived ? "Archived" : "Projects"}</span>
+            <span className="workspace-section-actions">
               <button
-                className={`task-row ${
-                  task.id === activeTaskId ? "active" : ""
-                }`}
-                key={task.id}
-                onClick={() => onSelectTask(task.id)}
-                aria-current={task.id === activeTaskId ? "page" : undefined}
-                title={project?.path}
+                type="button"
+                onClick={onRefreshSessions}
+                title="Refresh Grok sessions"
+                aria-label="Refresh Grok sessions"
               >
-                <span className="task-copy">
-                  <span className="task-title">{task.title}</span>
-                  <span className="task-meta">
-                    <span>{project?.name ?? "Local project"}</span>
-                    <span>•</span>
-                    <span>{formatTime(task.updatedAt)}</span>
-                  </span>
-                </span>
-                <StatusDot status={task.status} />
+                <Icon name="activity" size={13} />
               </button>
-            )
-          })}
-        </div>
-        {filteredTasks.length === 0 && (
-          <div className="sidebar-empty">
-            <p>
-              {projects.length === 0
-                ? "Select a repository to start a workspace."
-                : "No matching workspaces."}
-            </p>
+              {archivedCount > 0 && (
+                <button
+                  type="button"
+                  className={showArchived ? "active" : ""}
+                  onClick={() => setShowArchived((visible) => !visible)}
+                  title={showArchived ? "Back to projects" : "Show archived chats"}
+                >
+                  {showArchived ? "Back" : archivedCount}
+                </button>
+              )}
+              {!showArchived && (
+                <button
+                  type="button"
+                  onClick={onAddProject}
+                  title="Add project"
+                  aria-label="Add project"
+                >
+                  <Icon name="add" size={14} />
+                </button>
+              )}
+            </span>
+          </div>
+
+          <div className="sidebar-project-list">
+            {visibleProjects.map((project) => {
+              const projectMatches = project.name
+                .toLowerCase()
+                .includes(normalizedQuery)
+              const projectTasks = visibleTasks.filter(
+                (task) =>
+                  task.projectId === project.id &&
+                  !task.pinned &&
+                  (projectMatches || taskMatchesQuery(task)),
+              )
+
+              return (
+                <SidebarProjectGroup
+                  activeProject={project.id === activeProjectId}
+                  activeTaskId={activeTaskId}
+                  collapsed={
+                    normalizedQuery.length === 0 &&
+                    collapsedProjectIds.has(project.id)
+                  }
+                  key={project.id}
+                  onArchiveSession={onArchiveSession}
+                  onCreateTask={() => onCreateTask(project.id)}
+                  onExportSession={onExportSession}
+                  onRenameSession={onRenameSession}
+                  onSelectTask={onSelectTask}
+                  onToggle={() => toggleProject(project.id)}
+                  onToggleTaskLimit={() => toggleProjectTaskLimit(project.id)}
+                  project={project}
+                  showAllTasks={expandedTaskProjectIds.has(project.id)}
+                  tasks={projectTasks}
+                />
+              )
+            })}
+          </div>
+
+          {!showArchived && (
+            <button
+              type="button"
+              className="sidebar-add-project-row"
+              onClick={onAddProject}
+            >
+              <Icon name="folder" size={16} />
+              <span>Add project</span>
+            </button>
+          )}
+        </section>
+
+        {unassignedTasks.length > 0 && (
+          <section className="sidebar-content-section sidebar-chats-section">
+            <div className="workspace-section-title">
+              <span>Chats</span>
+            </div>
+            <div className="task-list sidebar-flat-task-list">
+              {unassignedTasks.map((task) => (
+                <SidebarTaskRow
+                  active={task.id === activeTaskId}
+                  compact
+                  key={task.id}
+                  onArchive={() => onArchiveSession(task)}
+                  onExport={() => onExportSession(task)}
+                  onRename={() => onRenameSession(task)}
+                  onSelect={() => onSelectTask(task.id)}
+                  task={task}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
+        {visibleProjects.length === 0 &&
+          pinnedTasks.length === 0 &&
+          unassignedTasks.length === 0 && (
+            <div className="sidebar-empty">
+              <p>
+                {projects.length === 0
+                  ? "Add a project to start a chat."
+                  : showArchived
+                    ? "No archived chats."
+                    : "No matching projects or chats."}
+              </p>
+            </div>
+          )}
+      </div>
+
+      <div className="sidebar-footer">
+        <button
+          type="button"
+          className="sidebar-runtime-card"
+          onClick={onOpenSettings}
+          aria-label="Open settings"
+        >
+          <span className="sidebar-runtime-mark">
+            <BrandMark size={16} />
+          </span>
+          <span className="sidebar-runtime-copy">
+            <strong>Grok runtime</strong>
+            <small>
+              {runtime.state === "ready"
+                ? runtime.version?.replace(/^grok\b/i, "Grok") ?? "Ready"
+                : runtime.state === "checking"
+                  ? "Checking…"
+                  : runtime.message ?? "Unavailable"}
+            </small>
+          </span>
+          <RuntimeDot runtime={runtime} />
+          <Icon name="gear" size={16} />
+        </button>
+      </div>
+    </aside>
+  )
+}
+
+const PROJECT_TASK_PREVIEW_LIMIT = 8
+
+interface SidebarProjectGroupProps {
+  project: Project
+  tasks: Task[]
+  activeTaskId: string | null
+  activeProject: boolean
+  collapsed: boolean
+  showAllTasks: boolean
+  onToggle: () => void
+  onToggleTaskLimit: () => void
+  onCreateTask: () => void
+  onSelectTask: (id: string) => void
+  onRenameSession: (task: Task) => void
+  onArchiveSession: (task: Task) => void
+  onExportSession: (task: Task) => void
+}
+
+function SidebarProjectGroup({
+  project,
+  tasks,
+  activeTaskId,
+  activeProject,
+  collapsed,
+  showAllTasks,
+  onToggle,
+  onToggleTaskLimit,
+  onCreateTask,
+  onSelectTask,
+  onRenameSession,
+  onArchiveSession,
+  onExportSession,
+}: SidebarProjectGroupProps) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const displayedTasks = showAllTasks
+    ? tasks
+    : tasks.slice(0, PROJECT_TASK_PREVIEW_LIMIT)
+  const hiddenTaskCount = tasks.length - displayedTasks.length
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const close = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false)
+    }
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false)
+    }
+    document.addEventListener("pointerdown", close, true)
+    window.addEventListener("keydown", closeOnEscape)
+    return () => {
+      document.removeEventListener("pointerdown", close, true)
+      window.removeEventListener("keydown", closeOnEscape)
+    }
+  }, [menuOpen])
+
+  const runAction = (action: () => void) => {
+    setMenuOpen(false)
+    action()
+  }
+
+  return (
+    <div
+      className={`sidebar-project-group ${activeProject ? "active" : ""}`}
+    >
+      <div className="sidebar-project-row-shell" ref={menuRef}>
+        <button
+          type="button"
+          className="sidebar-project-row"
+          aria-expanded={!collapsed}
+          onClick={onToggle}
+          title={project.path}
+        >
+          <span className="project-disclosure" aria-hidden="true">
+            <Icon name="chevron-right" size={13} />
+          </span>
+          <Icon name={collapsed ? "folder" : "folder-open"} size={16} />
+          <span className="sidebar-project-name">{project.name}</span>
+        </button>
+
+        <span className="sidebar-project-actions">
+          <button
+            type="button"
+            aria-label={`New chat in ${project.name}`}
+            title="New chat"
+            onClick={onCreateTask}
+          >
+            <Icon name="add" size={14} />
+          </button>
+          <button
+            type="button"
+            aria-label={`Project actions for ${project.name}`}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            title="Project actions"
+            onClick={() => setMenuOpen((open) => !open)}
+          >
+            <Icon name="more" size={15} />
+          </button>
+        </span>
+
+        {menuOpen && (
+          <div className="task-context-menu project-context-menu" role="menu">
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => runAction(onCreateTask)}
+            >
+              New chat
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() =>
+                runAction(() => void window.nolira?.openPath(project.path))
+              }
+            >
+              Open folder
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() =>
+                runAction(() => void navigator.clipboard.writeText(project.path))
+              }
+            >
+              Copy path
+            </button>
           </div>
         )}
       </div>
 
-      <div className="sidebar-footer">
-        <div className="sidebar-footer-tools">
-          <button
-            className="icon-button"
-            onClick={onOpenSettings}
-            aria-label="Settings"
-            title="Settings"
-          >
-            <Icon name="gear" size={18} />
-            <RuntimeDot runtime={runtime} />
+      {!collapsed && (
+        <div className="sidebar-project-task-list">
+          {displayedTasks.map((task) => (
+            <SidebarTaskRow
+              active={task.id === activeTaskId}
+              compact
+              key={task.id}
+              onArchive={() => onArchiveSession(task)}
+              onExport={() => onExportSession(task)}
+              onRename={() => onRenameSession(task)}
+              onSelect={() => onSelectTask(task.id)}
+              project={project}
+              task={task}
+            />
+          ))}
+
+          {tasks.length > PROJECT_TASK_PREVIEW_LIMIT && (
+            <button
+              type="button"
+              className="sidebar-show-more"
+              onClick={onToggleTaskLimit}
+            >
+              {showAllTasks ? "Show less" : `Show ${hiddenTaskCount} more`}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+interface SidebarTaskRowProps {
+  task: Task
+  project?: Project
+  active: boolean
+  compact?: boolean
+  onSelect: () => void
+  onRename: () => void
+  onArchive: () => void
+  onExport: () => void
+}
+
+function SidebarTaskRow({
+  task,
+  project,
+  active,
+  compact = false,
+  onSelect,
+  onRename,
+  onArchive,
+  onExport,
+}: SidebarTaskRowProps) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const manageable = Boolean(task.sessionId && task.sessionSource === "grok")
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const close = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false)
+    }
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false)
+    }
+    document.addEventListener("pointerdown", close, true)
+    window.addEventListener("keydown", closeOnEscape)
+    return () => {
+      document.removeEventListener("pointerdown", close, true)
+      window.removeEventListener("keydown", closeOnEscape)
+    }
+  }, [menuOpen])
+
+  const runAction = (action: () => void) => {
+    setMenuOpen(false)
+    action()
+  }
+
+  return (
+    <div className="task-row-shell" ref={menuRef}>
+      <button
+        type="button"
+        className={`task-row ${compact ? "task-row-compact" : ""} ${
+          active ? "active" : ""
+        }`}
+        onClick={onSelect}
+        aria-current={active ? "page" : undefined}
+        title={project?.path}
+      >
+        <span className="task-copy">
+          <span className="task-title">{task.title}</span>
+          {!compact && (
+            <span className="task-meta">
+              <span>{project?.name ?? "Local project"}</span>
+              <span>•</span>
+              <span>{formatTime(task.updatedAt)}</span>
+            </span>
+          )}
+        </span>
+        <StatusDot status={task.status} />
+      </button>
+
+      {manageable && (
+        <button
+          type="button"
+          className="task-menu-trigger"
+          aria-label={`Session actions for ${task.title}`}
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((open) => !open)}
+        >
+          <Icon name="more" size={16} />
+        </button>
+      )}
+
+      {menuOpen && (
+        <div className="task-context-menu" role="menu">
+          <button type="button" role="menuitem" onClick={() => runAction(onRename)}>
+            Rename
+          </button>
+          <button type="button" role="menuitem" onClick={() => runAction(onExport)}>
+            Copy as Markdown
+          </button>
+          <button type="button" role="menuitem" onClick={() => runAction(onArchive)}>
+            {task.archived ? "Restore" : "Archive"}
           </button>
         </div>
-        <button className="sidebar-footer-button" onClick={onAddProject}>
-          <span>Add repository</span>
-        </button>
-      </div>
-    </aside>
+      )}
+    </div>
   )
 }
 
@@ -1234,8 +2014,57 @@ function ChatWorkspace({
   )
   const [sending, setSending] = useState(false)
   const [previewMessages, setPreviewMessages] = useState<ChatMessage[]>([])
+  const [cursorPosition, setCursorPosition] = useState(0)
+  const [fileMatches, setFileMatches] = useState<WorkspaceFile[]>([])
+  const [skills, setSkills] = useState<SkillSummary[]>([])
+  const [activeSuggestion, setActiveSuggestion] = useState(0)
+  const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  const trigger = useMemo(
+    () => composerTriggerAt(text, cursorPosition),
+    [cursorPosition, text],
+  )
+  const suggestions = useMemo<ComposerSuggestion[]>(() => {
+    if (!trigger || suggestionsDismissed) return []
+    const query = trigger.query.toLowerCase()
+    if (trigger.marker === "@") {
+      return fileMatches.map((file) => ({
+        id: `file:${file.path}`,
+        kind: "file" as const,
+        file,
+      }))
+    }
+
+    const commands = COMPOSER_COMMANDS.filter(
+      (command) => !query || command.name.includes(query),
+    ).map((command) => ({
+      id: `command:${command.name}`,
+      kind: "command" as const,
+      command,
+    }))
+    const skillQuery = query.startsWith("skill:")
+      ? query.slice("skill:".length)
+      : ""
+    const skillItems = query.startsWith("skill")
+      ? skills
+          .filter(
+            (skill) =>
+              !skillQuery ||
+              `${skill.name} ${skill.description ?? ""}`
+                .toLowerCase()
+                .includes(skillQuery),
+          )
+          .slice(0, 12)
+          .map((skill) => ({
+            id: `skill:${skill.id}`,
+            kind: "skill" as const,
+            skill,
+          }))
+      : []
+    return [...commands, ...skillItems].slice(0, 14)
+  }, [fileMatches, skills, suggestionsDismissed, trigger])
 
   const messages = apiAvailable
     ? (task?.messages ?? [])
@@ -1265,6 +2094,52 @@ function ChatWorkspace({
     area.style.height = `${Math.min(area.scrollHeight, 180)}px`
   }, [text])
 
+  useEffect(() => {
+    if (!window.nolira) return
+    let alive = true
+    void window.nolira
+      .invoke("skills.list", { projectId: project?.id })
+      .then((response) => {
+        if (alive && response.ok) setSkills(response.data.skills)
+      })
+    return () => {
+      alive = false
+    }
+  }, [project?.id])
+
+  useEffect(() => {
+    if (
+      !window.nolira ||
+      !project?.id ||
+      trigger?.marker !== "@" ||
+      suggestionsDismissed
+    ) {
+      setFileMatches([])
+      return
+    }
+
+    let alive = true
+    const timer = window.setTimeout(() => {
+      void window.nolira!
+        .invoke("workspace.files", {
+          projectId: project.id,
+          query: trigger.query,
+          limit: 30,
+        })
+        .then((response) => {
+          if (alive && response.ok) setFileMatches(response.data.files)
+        })
+    }, 80)
+    return () => {
+      alive = false
+      window.clearTimeout(timer)
+    }
+  }, [project?.id, suggestionsDismissed, trigger?.marker, trigger?.query])
+
+  useEffect(() => {
+    setActiveSuggestion(0)
+  }, [trigger?.marker, trigger?.query, suggestions.length])
+
   const addAttachments = async () => {
     if (!window.nolira) {
       onSendError("File attachments are available in the desktop app")
@@ -1275,6 +2150,76 @@ function ChatWorkspace({
       setAttachments((current) => [...current, ...files])
     } catch (error) {
       onSendError(error instanceof Error ? error.message : "Could not attach file")
+    }
+  }
+
+  const applySuggestion = (suggestion: ComposerSuggestion) => {
+    if (!trigger) return
+    let replacement = ""
+
+    if (suggestion.kind === "file") {
+      const pathLabel = suggestion.file.relativePath.includes(" ")
+        ? `@"${suggestion.file.relativePath}" `
+        : `@${suggestion.file.relativePath} `
+      replacement = pathLabel
+      const attachment = fileAsAttachment(suggestion.file)
+      setAttachments((current) =>
+        current.some((item) => item.path === attachment.path)
+          ? current
+          : [...current, attachment],
+      )
+    } else if (suggestion.kind === "command") {
+      replacement = suggestion.command.prompt
+    } else {
+      replacement = `Use the "${suggestion.skill.name}" skill for this task. `
+    }
+
+    const nextText = `${text.slice(0, trigger.start)}${replacement}${text.slice(
+      trigger.end,
+    )}`
+    const nextCursor = trigger.start + replacement.length
+    setText(nextText)
+    setCursorPosition(nextCursor)
+    setSuggestionsDismissed(true)
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus()
+      textareaRef.current?.setSelectionRange(nextCursor, nextCursor)
+    })
+  }
+
+  const importPastedImages = async (
+    event: ReactClipboardEvent<HTMLTextAreaElement>,
+  ) => {
+    const images = Array.from(event.clipboardData.files)
+      .filter((file) => file.type.startsWith("image/"))
+      .slice(0, 5)
+    if (images.length === 0) return
+    event.preventDefault()
+    if (!window.nolira) {
+      onSendError("Image paste is available in the desktop app")
+      return
+    }
+
+    try {
+      const imported = await Promise.all(
+        images.map(async (file, index) => {
+          if (file.size > 8 * 1024 * 1024) {
+            throw new Error(`${file.name || "Pasted image"} is larger than 8 MB`)
+          }
+          const response = await window.nolira!.invoke("attachments.importData", {
+            name: file.name || `pasted-image-${Date.now()}-${index + 1}`,
+            mimeType: file.type,
+            dataBase64: await fileToBase64(file),
+          })
+          if (!response.ok) throw new Error(response.error.message)
+          return response.data.attachment
+        }),
+      )
+      setAttachments((current) => [...current, ...imported])
+    } catch (error) {
+      onSendError(
+        error instanceof Error ? error.message : "Could not import pasted image",
+      )
     }
   }
 
@@ -1357,6 +2302,27 @@ function ChatWorkspace({
     if (event.key === "Enter" && command) {
       event.preventDefault()
       void send()
+      return
+    }
+    if (suggestions.length === 0) return
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault()
+      const direction = event.key === "ArrowDown" ? 1 : -1
+      setActiveSuggestion(
+        (current) => (current + direction + suggestions.length) % suggestions.length,
+      )
+      return
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      const suggestion = suggestions[activeSuggestion]
+      if (!suggestion) return
+      event.preventDefault()
+      applySuggestion(suggestion)
+      return
+    }
+    if (event.key === "Escape") {
+      event.preventDefault()
+      setSuggestionsDismissed(true)
     }
   }
 
@@ -1394,12 +2360,74 @@ function ChatWorkspace({
           ))}
         </div>
       )}
+      {suggestions.length > 0 && (
+        <div className="composer-suggestions" id="composer-suggestions" role="listbox">
+          {suggestions.map((suggestion, index) => {
+            const label =
+              suggestion.kind === "file"
+                ? suggestion.file.relativePath
+                : suggestion.kind === "command"
+                  ? `/${suggestion.command.name}`
+                  : `/skill:${suggestion.skill.name}`
+            const detail =
+              suggestion.kind === "file"
+                ? formatBytes(suggestion.file.size)
+                : suggestion.kind === "command"
+                  ? suggestion.command.description
+                  : `${suggestion.skill.source} · ${suggestion.skill.description ?? "Installed skill"}`
+            return (
+              <button
+                type="button"
+                id={`composer-suggestion-${index}`}
+                role="option"
+                aria-selected={index === activeSuggestion}
+                className={index === activeSuggestion ? "active" : ""}
+                key={suggestion.id}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => applySuggestion(suggestion)}
+              >
+                <span className="composer-suggestion-icon">
+                  <Icon
+                    name={
+                      suggestion.kind === "file"
+                        ? "code"
+                        : suggestion.kind === "skill"
+                          ? "spark"
+                          : "terminal"
+                    }
+                    size={14}
+                  />
+                </span>
+                <span className="composer-suggestion-copy">
+                  <strong>{label}</strong>
+                  <small>{detail}</small>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      )}
       <textarea
         ref={textareaRef}
         aria-label="Message Grok"
-        onChange={(event) => setText(event.target.value)}
+        aria-autocomplete="list"
+        aria-controls={suggestions.length > 0 ? "composer-suggestions" : undefined}
+        aria-activedescendant={
+          suggestions.length > 0
+            ? `composer-suggestion-${activeSuggestion}`
+            : undefined
+        }
+        onChange={(event) => {
+          setText(event.target.value)
+          setCursorPosition(event.target.selectionStart)
+          setSuggestionsDismissed(false)
+        }}
         onKeyDown={onComposerKeyDown}
-        placeholder="Plan, add context, or ask Grok anything"
+        onPaste={(event) => void importPastedImages(event)}
+        onSelect={(event) =>
+          setCursorPosition(event.currentTarget.selectionStart)
+        }
+        placeholder="Ask Grok, @ a file, or type / for commands"
         rows={1}
         value={text}
       />
@@ -1754,11 +2782,24 @@ interface ActivityPanelProps {
   project: Project | null
   runtime: RuntimeStatus
   onClose: () => void
+  onNotify: (message: string) => void
 }
 
-function ActivityPanel({ task, project, runtime, onClose }: ActivityPanelProps) {
-  const [tab, setTab] = useState<"activity" | "info">("activity")
+type ActivityPanelTab = "activity" | "files" | "changes" | "info"
+
+function ActivityPanel({
+  task,
+  project,
+  runtime,
+  onClose,
+  onNotify,
+}: ActivityPanelProps) {
+  const [tab, setTab] = useState<ActivityPanelTab>("activity")
+  const [requestedFile, setRequestedFile] = useState<string>()
   const plan = task?.plan ?? []
+  const goal = task?.goal
+  const subagents = task?.subagents ?? []
+  const backgroundTasks = task?.backgroundTasks ?? []
   const tools = useMemo(
     () =>
       (task?.messages ?? []).flatMap((message) =>
@@ -1775,26 +2816,26 @@ function ActivityPanel({ task, project, runtime, onClose }: ActivityPanelProps) 
           role="tablist"
           aria-label="Details panel sections"
         >
-          <button
-            className={tab === "activity" ? "active" : ""}
-            onClick={() => setTab("activity")}
-            id="activity-details-tab"
-            role="tab"
-            aria-controls="activity-details-panel"
-            aria-selected={tab === "activity"}
-          >
-            Details
-          </button>
-          <button
-            className={tab === "info" ? "active" : ""}
-            onClick={() => setTab("info")}
-            id="activity-info-tab"
-            role="tab"
-            aria-controls="activity-info-panel"
-            aria-selected={tab === "info"}
-          >
-            Info
-          </button>
+          {(
+            [
+              ["activity", "Activity"],
+              ["files", "Files"],
+              ["changes", "Changes"],
+              ["info", "Info"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              className={tab === value ? "active" : ""}
+              onClick={() => setTab(value)}
+              id={`activity-${value}-tab`}
+              role="tab"
+              aria-controls={`activity-${value}-panel`}
+              aria-selected={tab === value}
+              key={value}
+            >
+              {label}
+            </button>
+          ))}
         </div>
         <button
           className="icon-button no-drag"
@@ -1805,15 +2846,31 @@ function ActivityPanel({ task, project, runtime, onClose }: ActivityPanelProps) 
         </button>
       </div>
 
-      {tab === "activity" ? (
+      {tab === "activity" && (
         <div
           className="activity-content"
-          id="activity-details-panel"
+          id="activity-activity-panel"
           role="tabpanel"
-          aria-labelledby="activity-details-tab"
+          aria-labelledby="activity-activity-tab"
         >
-          {plan.length > 0 || tools.length > 0 ? (
+          {goal ||
+          plan.length > 0 ||
+          tools.length > 0 ||
+          subagents.length > 0 ||
+          backgroundTasks.length > 0 ? (
             <>
+              {goal && (
+                <div className={`activity-goal goal-${goal.status}`}>
+                  <span className="eyebrow">Goal · {goal.status}</span>
+                  <strong>{goal.objective || "Active goal"}</strong>
+                  {(goal.message || goal.lastEvent) && (
+                    <p>{goal.message ?? goal.lastEvent}</p>
+                  )}
+                  {goal.elapsedMs !== undefined && (
+                    <small>{formatDuration(goal.elapsedMs)}</small>
+                  )}
+                </div>
+              )}
               {plan.length > 0 && (
                 <div className="activity-plan">
                   <span className="eyebrow">Plan</span>
@@ -1844,6 +2901,95 @@ function ActivityPanel({ task, project, runtime, onClose }: ActivityPanelProps) 
                   ))}
                 </div>
               )}
+              {subagents.length > 0 && (
+                <div className="activity-group">
+                  <span className="eyebrow">Subagents</span>
+                  <div className="subagent-list">
+                    {subagents.map((subagent) => (
+                      <div className="subagent-item" key={subagent.id}>
+                        <span className={`subagent-node subagent-${subagent.status}`}>
+                          {subagent.phase === "finished" ? (
+                            <Icon
+                              name={subagent.error ? "close" : "check"}
+                              size={11}
+                            />
+                          ) : (
+                            <span className="status-pulse" />
+                          )}
+                        </span>
+                        <div>
+                          <strong>{subagent.type ?? "Subagent"}</strong>
+                          <p>{subagent.description ?? subagent.id}</p>
+                          <small>
+                            {[
+                              subagent.status,
+                              subagent.turnCount !== undefined
+                                ? `${subagent.turnCount} turns`
+                                : undefined,
+                              subagent.toolCallCount !== undefined
+                                ? `${subagent.toolCallCount} tools`
+                                : undefined,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ")}
+                          </small>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {backgroundTasks.length > 0 && (
+                <div className="activity-group">
+                  <span className="eyebrow">Background tasks</span>
+                  <div className="background-task-list">
+                    {backgroundTasks.map((backgroundTask) => (
+                      <div className="background-task-item" key={backgroundTask.id}>
+                        <span
+                          className={`background-task-node task-${backgroundTask.phase}`}
+                        >
+                          {backgroundTask.phase === "completed" ? (
+                            <Icon
+                              name={backgroundTask.success === false ? "close" : "check"}
+                              size={11}
+                            />
+                          ) : backgroundTask.isMonitor ? (
+                            <Icon name="activity" size={12} />
+                          ) : (
+                            <span className="status-pulse" />
+                          )}
+                        </span>
+                        <div>
+                          <strong>
+                            {backgroundTask.description ??
+                              backgroundTask.command ??
+                              backgroundTask.id}
+                          </strong>
+                          {(backgroundTask.eventText || backgroundTask.output) && (
+                            <p>
+                              {backgroundTask.eventText ?? backgroundTask.output}
+                            </p>
+                          )}
+                          <small>
+                            {[
+                              backgroundTask.phase,
+                              backgroundTask.exitCode !== undefined &&
+                              backgroundTask.exitCode !== null
+                                ? `exit ${backgroundTask.exitCode}`
+                                : undefined,
+                              backgroundTask.durationMs !== undefined
+                                ? formatDuration(backgroundTask.durationMs)
+                                : undefined,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ")}
+                          </small>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </>
           ) : (
             <PanelEmpty
@@ -1853,7 +2999,28 @@ function ActivityPanel({ task, project, runtime, onClose }: ActivityPanelProps) 
             />
           )}
         </div>
-      ) : (
+      )}
+
+      {tab === "files" && (
+        <WorkspaceFilesPanel
+          onNotify={onNotify}
+          project={project}
+          requestedPath={requestedFile}
+        />
+      )}
+
+      {tab === "changes" && (
+        <WorkspaceChangesPanel
+          onNotify={onNotify}
+          onOpenFile={(path) => {
+            setRequestedFile(path)
+            setTab("files")
+          }}
+          project={project}
+        />
+      )}
+
+      {tab === "info" && (
         <div
           className="task-info-content"
           id="activity-info-panel"
@@ -1902,6 +3069,349 @@ function ActivityPanel({ task, project, runtime, onClose }: ActivityPanelProps) 
   )
 }
 
+function WorkspaceFilesPanel({
+  project,
+  requestedPath,
+  onNotify,
+}: {
+  project: Project | null
+  requestedPath?: string
+  onNotify: (message: string) => void
+}) {
+  const [query, setQuery] = useState("")
+  const [files, setFiles] = useState<WorkspaceFile[]>([])
+  const [opened, setOpened] = useState<WorkspaceFileContent | null>(null)
+  const [draft, setDraft] = useState("")
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [refreshKey, setRefreshKey] = useState(0)
+  const dirty = Boolean(opened && draft !== opened.content)
+
+  useEffect(() => {
+    if (!window.nolira || !project) {
+      setFiles([])
+      return
+    }
+    let alive = true
+    const timer = window.setTimeout(() => {
+      void window.nolira!
+        .invoke("workspace.files", {
+          projectId: project.id,
+          query,
+          limit: 120,
+        })
+        .then((response) => {
+          if (!alive) return
+          if (!response.ok) throw new Error(response.error.message)
+          setFiles(response.data.files)
+        })
+        .catch((error: unknown) => {
+          if (alive) {
+            onNotify(
+              error instanceof Error ? error.message : "Could not list files",
+            )
+          }
+        })
+    }, 90)
+    return () => {
+      alive = false
+      window.clearTimeout(timer)
+    }
+  }, [project, query, refreshKey, onNotify])
+
+  const openFile = async (path: string) => {
+    if (!window.nolira || !project) return
+    if (
+      dirty &&
+      opened?.file.relativePath !== path &&
+      !window.confirm("Discard the unsaved editor changes?")
+    ) {
+      return
+    }
+    setLoading(true)
+    try {
+      const response = await window.nolira.invoke("workspace.readFile", {
+        projectId: project.id,
+        path,
+      })
+      if (!response.ok) throw new Error(response.error.message)
+      setOpened(response.data)
+      setDraft(response.data.content)
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Could not open file")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (requestedPath) void openFile(requestedPath)
+    // requestedPath is an explicit navigation request; editor state is read inside openFile.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.id, requestedPath])
+
+  const save = async () => {
+    if (!window.nolira || !project || !opened || !dirty || saving) return
+    setSaving(true)
+    try {
+      const response = await window.nolira.invoke("workspace.writeFile", {
+        projectId: project.id,
+        path: opened.file.relativePath,
+        content: draft,
+        expectedMtimeMs: opened.mtimeMs,
+      })
+      if (!response.ok) throw new Error(response.error.message)
+      setOpened(response.data)
+      setDraft(response.data.content)
+      setRefreshKey((value) => value + 1)
+      onNotify(`Saved ${response.data.file.relativePath}`)
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Could not save file")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (!project) {
+    return (
+      <PanelEmpty
+        icon="folder"
+        title="No repository selected"
+        text="Choose a repository to browse and edit files."
+      />
+    )
+  }
+
+  return (
+    <div
+      className={`workspace-files-panel ${opened ? "has-editor" : ""}`}
+      id="activity-files-panel"
+      role="tabpanel"
+      aria-labelledby="activity-files-tab"
+    >
+      <div className="panel-search-row">
+        <Icon name="search" size={14} />
+        <input
+          aria-label="Filter repository files"
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Filter files"
+          value={query}
+        />
+        <button
+          type="button"
+          onClick={() => setRefreshKey((value) => value + 1)}
+          aria-label="Refresh files"
+          title="Refresh files"
+        >
+          <Icon name="activity" size={14} />
+        </button>
+      </div>
+
+      <div className="workspace-file-list">
+        {files.map((file) => (
+          <button
+            type="button"
+            className={opened?.file.relativePath === file.relativePath ? "active" : ""}
+            key={file.path}
+            onClick={() => void openFile(file.relativePath)}
+            title={file.relativePath}
+          >
+            <Icon name="code" size={13} />
+            <span>{file.relativePath}</span>
+            <small>{formatBytes(file.size)}</small>
+          </button>
+        ))}
+        {files.length === 0 && (
+          <span className="panel-list-empty">No matching files</span>
+        )}
+      </div>
+
+      {opened && (
+        <div className="workspace-editor">
+          <div className="workspace-editor-header">
+            <span title={opened.file.relativePath}>
+              {opened.file.relativePath}
+              {dirty && <i> • edited</i>}
+            </span>
+            <button type="button" disabled={!dirty || saving} onClick={() => void save()}>
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+          <textarea
+            aria-label={`Edit ${opened.file.relativePath}`}
+            disabled={loading}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              const command = isMac(window.nolira?.platform ?? "")
+                ? event.metaKey
+                : event.ctrlKey
+              if (command && event.key.toLowerCase() === "s") {
+                event.preventDefault()
+                void save()
+              }
+            }}
+            spellCheck={false}
+            value={draft}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function WorkspaceChangesPanel({
+  project,
+  onOpenFile,
+  onNotify,
+}: {
+  project: Project | null
+  onOpenFile: (path: string) => void
+  onNotify: (message: string) => void
+}) {
+  const [changes, setChanges] = useState<WorkspaceChange[]>([])
+  const [branch, setBranch] = useState<string>()
+  const [selected, setSelected] = useState<WorkspaceChange>()
+  const [diff, setDiff] = useState<WorkspaceDiff>()
+  const [loading, setLoading] = useState(false)
+  const [refreshKey, setRefreshKey] = useState(0)
+
+  useEffect(() => {
+    if (!window.nolira || !project) return
+    let alive = true
+    setLoading(true)
+    void window.nolira
+      .invoke("workspace.changes", { projectId: project.id })
+      .then((response) => {
+        if (!alive) return
+        if (!response.ok) throw new Error(response.error.message)
+        setChanges(response.data.changes)
+        setBranch(response.data.branch)
+        if (
+          selected &&
+          !response.data.changes.some((change) => change.path === selected.path)
+        ) {
+          setSelected(undefined)
+          setDiff(undefined)
+        }
+      })
+      .catch((error: unknown) => {
+        if (alive) onNotify(error instanceof Error ? error.message : "Could not read Git status")
+      })
+      .finally(() => alive && setLoading(false))
+    return () => {
+      alive = false
+    }
+  }, [project, refreshKey])
+
+  const openDiff = async (change: WorkspaceChange) => {
+    if (!window.nolira || !project) return
+    setSelected(change)
+    setLoading(true)
+    try {
+      const response = await window.nolira.invoke("workspace.diff", {
+        projectId: project.id,
+        path: change.path,
+        staged: change.staged,
+      })
+      if (!response.ok) throw new Error(response.error.message)
+      setDiff(response.data)
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Could not load diff")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  if (!project) {
+    return (
+      <PanelEmpty
+        icon="code"
+        title="No repository selected"
+        text="Choose a Git repository to inspect changes."
+      />
+    )
+  }
+
+  return (
+    <div
+      className="workspace-changes-panel"
+      id="activity-changes-panel"
+      role="tabpanel"
+      aria-labelledby="activity-changes-tab"
+    >
+      <div className="changes-toolbar">
+        <span>{branch || "Detached HEAD"}</span>
+        <small>{changes.length} changed</small>
+        <button
+          type="button"
+          onClick={() => setRefreshKey((value) => value + 1)}
+          aria-label="Refresh changes"
+          title="Refresh changes"
+        >
+          <Icon name="activity" size={14} />
+        </button>
+      </div>
+      <div className="workspace-change-list">
+        {changes.map((change) => (
+          <button
+            type="button"
+            className={selected?.path === change.path ? "active" : ""}
+            key={`${change.indexStatus}${change.worktreeStatus}:${change.path}`}
+            onClick={() => void openDiff(change)}
+            title={change.path}
+          >
+            <span className={`change-badge change-${change.status}`}>
+              {change.status.slice(0, 1).toUpperCase()}
+            </span>
+            <span>{change.path}</span>
+            {change.staged && <small>staged</small>}
+          </button>
+        ))}
+        {!loading && changes.length === 0 && (
+          <span className="panel-list-empty">Working tree is clean</span>
+        )}
+      </div>
+      {selected && (
+        <div className="workspace-diff-shell">
+          <div className="workspace-diff-header">
+            <span>{selected.path}</span>
+            {selected.status !== "deleted" && (
+              <button type="button" onClick={() => onOpenFile(selected.path)}>
+                Open file
+              </button>
+            )}
+          </div>
+          <DiffView diff={diff?.diff ?? (loading ? "Loading diff…" : "No diff available")} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DiffView({ diff }: { diff: string }) {
+  return (
+    <pre className="workspace-diff-view">
+      {diff.split("\n").map((line, index) => {
+        const className = line.startsWith("+")
+          ? "diff-added"
+          : line.startsWith("-")
+            ? "diff-removed"
+            : line.startsWith("@@")
+              ? "diff-hunk"
+              : line.startsWith("diff ") || line.startsWith("index ")
+                ? "diff-meta"
+                : ""
+        return (
+          <span className={className} key={`${index}-${line.slice(0, 24)}`}>
+            {line || " "}
+            {"\n"}
+          </span>
+        )
+      })}
+    </pre>
+  )
+}
+
 function InfoRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="info-row">
@@ -1929,12 +3439,117 @@ function PanelEmpty({
   )
 }
 
-interface SettingsViewProps {
-  settings: AppSettings
-  runtime: RuntimeStatus
+function InboxView({
+  inbox,
+  sidebarOpen,
+  onBack,
+  onDismiss,
+  onMarkAllRead,
+  onOpenItem,
+  toggleSidebar,
+}: {
+  inbox: InboxItem[]
   platform: string
   sidebarOpen: boolean
   onBack: () => void
+  onDismiss: (id: string) => void
+  onMarkAllRead: () => void
+  onOpenItem: (item: InboxItem) => void
+  toggleSidebar: () => void
+}) {
+  const unread = inbox.filter((item) => !item.read).length
+  return (
+    <div className="inbox-screen">
+      <header className="settings-header drag-region">
+        <div className="no-drag settings-header-actions">
+          {!sidebarOpen && (
+            <button
+              className="icon-button sidebar-toggle-open"
+              onClick={toggleSidebar}
+              aria-label="Open sidebar"
+            >
+              <Icon name="layout-left" size={18} />
+            </button>
+          )}
+          <button className="back-button" onClick={onBack}>
+            <Icon name="chevron-left" size={16} />
+            Workspace
+          </button>
+        </div>
+        <h1>Inbox</h1>
+      </header>
+      <div className="inbox-content">
+        <div className="inbox-heading">
+          <div>
+            <h2>Notifications</h2>
+            <p>Permission requests, monitors, and background task results.</p>
+          </div>
+          {unread > 0 && (
+            <button type="button" onClick={onMarkAllRead}>
+              Mark all read
+            </button>
+          )}
+        </div>
+        <div className="inbox-list">
+          {inbox.map((item) => {
+            const icon: IconName =
+              item.type === "background_task"
+                ? "terminal"
+                : item.type === "automation"
+                  ? "spark"
+                  : item.type === "monitor"
+                    ? "activity"
+                    : "warning"
+            return (
+              <div className={`inbox-item ${item.read ? "" : "unread"}`} key={item.id}>
+                <button
+                  type="button"
+                  className="inbox-item-main"
+                  onClick={() => onOpenItem(item)}
+                >
+                  <span className={`inbox-item-icon inbox-${item.type}`}>
+                    <Icon name={icon} size={16} />
+                  </span>
+                  <span className="inbox-item-copy">
+                    <strong>{item.title}</strong>
+                    {item.body && <span>{item.body}</span>}
+                    <small>{formatTime(item.createdAt)}</small>
+                  </span>
+                  {!item.read && <i aria-label="Unread" />}
+                </button>
+                <button
+                  type="button"
+                  className="inbox-dismiss"
+                  onClick={() => onDismiss(item.id)}
+                  aria-label={`Dismiss ${item.title}`}
+                  title="Dismiss"
+                >
+                  <Icon name="close" size={14} />
+                </button>
+              </div>
+            )
+          })}
+          {inbox.length === 0 && (
+            <PanelEmpty
+              icon="activity"
+              title="Inbox is clear"
+              text="Background task results and items needing attention will appear here."
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+interface SettingsViewProps {
+  settings: AppSettings
+  runtime: RuntimeStatus
+  projects: Project[]
+  platform: string
+  sidebarOpen: boolean
+  onBack: () => void
+  onNotify: (message: string) => void
   toggleSidebar: () => void
   onUpdate: (patch: Partial<AppSettings>) => void
 }
@@ -1942,8 +3557,10 @@ interface SettingsViewProps {
 function SettingsView({
   settings,
   runtime,
+  projects,
   sidebarOpen,
   onBack,
+  onNotify,
   toggleSidebar,
   onUpdate,
 }: SettingsViewProps) {
@@ -1960,6 +3577,7 @@ function SettingsView({
     { id: "general", label: "General", icon: "gear" },
     { id: "runtime", label: "Grok runtime", icon: "terminal" },
     { id: "appearance", label: "Appearance", icon: "spark" },
+    { id: "integrations", label: "Integrations", icon: "code" },
   ]
 
   return (
@@ -2144,9 +3762,393 @@ function SettingsView({
               </SettingRow>
             </SettingsSectionView>
           )}
+
+          {section === "integrations" && (
+            <IntegrationsSettings onNotify={onNotify} projects={projects} />
+          )}
         </div>
       </div>
     </div>
+  )
+}
+
+type IntegrationTab = "provider" | "skills" | "mcp" | "memory" | "automations"
+
+function IntegrationsSettings({
+  projects,
+  onNotify,
+}: {
+  projects: Project[]
+  onNotify: (message: string) => void
+}) {
+  const api = window.nolira
+  const [tab, setTab] = useState<IntegrationTab>("provider")
+  const [projectId, setProjectId] = useState(projects[0]?.id ?? "")
+  const [providers, setProviders] = useState<ProviderSummary[]>([])
+  const [skills, setSkills] = useState<SkillSummary[]>([])
+  const [servers, setServers] = useState<McpServerConfig[]>([])
+  const [memory, setMemory] = useState<WorkspaceMemory>()
+  const [memoryContent, setMemoryContent] = useState("")
+  const [memoryEnabled, setMemoryEnabled] = useState(true)
+  const [automations, setAutomations] = useState<AutomationDefinition[]>([])
+  const [mcpName, setMcpName] = useState("")
+  const [mcpCommand, setMcpCommand] = useState("")
+  const [mcpArgs, setMcpArgs] = useState("")
+  const [automationName, setAutomationName] = useState("")
+  const [automationPrompt, setAutomationPrompt] = useState("")
+  const [automationInterval, setAutomationInterval] = useState(60)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (!projectId && projects[0]) setProjectId(projects[0].id)
+  }, [projectId, projects])
+
+  useEffect(() => {
+    if (!api) return
+    let alive = true
+    void api.invoke("providers.list", {}).then((response) => {
+      if (alive && response.ok) setProviders(response.data.providers)
+    })
+    void api.invoke("mcp.list", {}).then((response) => {
+      if (alive && response.ok) setServers(response.data.servers)
+    })
+    void api.invoke("automations.list", {}).then((response) => {
+      if (alive && response.ok) setAutomations(response.data.automations)
+    })
+    return () => {
+      alive = false
+    }
+  }, [api])
+
+  useEffect(() => {
+    if (!api) return
+    let alive = true
+    void api
+      .invoke("skills.list", { projectId: projectId || undefined })
+      .then((response) => {
+        if (alive && response.ok) setSkills(response.data.skills)
+      })
+    if (projectId) {
+      void api.invoke("memory.get", { projectId }).then((response) => {
+        if (!alive || !response.ok) return
+        setMemory(response.data.memory)
+        setMemoryContent(response.data.memory.content)
+        setMemoryEnabled(response.data.memory.enabled)
+      })
+    }
+    return () => {
+      alive = false
+    }
+  }, [api, projectId])
+
+  const saveNewMcp = async () => {
+    if (!api || !mcpName.trim() || !mcpCommand.trim()) return
+    setSaving(true)
+    try {
+      const response = await api.invoke("mcp.save", {
+        name: mcpName.trim(),
+        command: mcpCommand.trim(),
+        args: mcpArgs
+          .split("\n")
+          .map((argument) => argument.trim())
+          .filter(Boolean),
+        enabled: true,
+      })
+      if (!response.ok) throw new Error(response.error.message)
+      setServers(response.data.servers)
+      setMcpName("")
+      setMcpCommand("")
+      setMcpArgs("")
+      onNotify("MCP server saved; it will be used by new sessions")
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Could not save MCP server")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const updateMcp = async (server: McpServerConfig, enabled: boolean) => {
+    if (!api) return
+    const response = await api.invoke("mcp.save", { ...server, enabled })
+    if (response.ok) setServers(response.data.servers)
+    else onNotify(response.error.message)
+  }
+
+  const removeMcp = async (server: McpServerConfig) => {
+    if (!api || !window.confirm(`Remove MCP server “${server.name}”?`)) return
+    const response = await api.invoke("mcp.remove", { id: server.id })
+    if (response.ok) setServers(response.data.servers)
+    else onNotify(response.error.message)
+  }
+
+  const saveMemory = async () => {
+    if (!api || !projectId) return
+    setSaving(true)
+    try {
+      const response = await api.invoke("memory.set", {
+        projectId,
+        enabled: memoryEnabled,
+        content: memoryContent,
+      })
+      if (!response.ok) throw new Error(response.error.message)
+      setMemory(response.data.memory)
+      onNotify("Workspace memory saved for new sessions")
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Could not save memory")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const saveNewAutomation = async () => {
+    if (!api || !projectId || !automationName.trim() || !automationPrompt.trim()) {
+      return
+    }
+    setSaving(true)
+    try {
+      const response = await api.invoke("automations.save", {
+        name: automationName.trim(),
+        projectId,
+        prompt: automationPrompt.trim(),
+        intervalMinutes: automationInterval,
+        enabled: true,
+      })
+      if (!response.ok) throw new Error(response.error.message)
+      setAutomations(response.data.automations)
+      setAutomationName("")
+      setAutomationPrompt("")
+      onNotify("Automation scheduled")
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Could not save automation")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const updateAutomation = async (
+    automation: AutomationDefinition,
+    enabled: boolean,
+  ) => {
+    if (!api) return
+    const response = await api.invoke("automations.save", {
+      id: automation.id,
+      name: automation.name,
+      projectId: automation.projectId,
+      prompt: automation.prompt,
+      intervalMinutes: automation.intervalMinutes,
+      enabled,
+    })
+    if (response.ok) setAutomations(response.data.automations)
+    else onNotify(response.error.message)
+  }
+
+  const removeAutomation = async (automation: AutomationDefinition) => {
+    if (!api || !window.confirm(`Remove automation “${automation.name}”?`)) return
+    const response = await api.invoke("automations.remove", { id: automation.id })
+    if (response.ok) setAutomations(response.data.automations)
+    else onNotify(response.error.message)
+  }
+
+  const runAutomationNow = async (automation: AutomationDefinition) => {
+    if (!api) return
+    const response = await api.invoke("automations.runNow", { id: automation.id })
+    if (!response.ok) {
+      onNotify(response.error.message)
+      return
+    }
+    setAutomations((current) =>
+      current.map((item) =>
+        item.id === response.data.automation.id
+          ? response.data.automation
+          : item,
+      ),
+    )
+    onNotify(`Started ${automation.name}`)
+  }
+
+  const integrationTabs: Array<{
+    id: IntegrationTab
+    label: string
+  }> = [
+    { id: "provider", label: "Provider" },
+    { id: "skills", label: "Skills" },
+    { id: "mcp", label: "MCP" },
+    { id: "memory", label: "Memory" },
+    { id: "automations", label: "Automations" },
+  ]
+
+  return (
+    <section className="settings-section integrations-settings">
+      <div className="settings-section-heading">
+        <h2>Integrations</h2>
+        <p>Connect the Grok runtime to your tools and recurring workflows.</p>
+      </div>
+      <div className="integration-tabs" role="tablist">
+        {integrationTabs.map((item) => (
+          <button
+            type="button"
+            className={tab === item.id ? "active" : ""}
+            key={item.id}
+            onClick={() => setTab(item.id)}
+            role="tab"
+            aria-selected={tab === item.id}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      {(tab === "skills" || tab === "memory" || tab === "automations") && (
+        <label className="integration-project-picker">
+          <span>Repository</span>
+          <select value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+
+      {tab === "provider" && (
+        <div className="integration-card-list">
+          {providers.map((provider) => (
+            <div className="integration-card provider-card" key={provider.id}>
+              <span className="integration-card-icon">
+                <BrandMark size={20} />
+              </span>
+              <div>
+                <strong>{provider.name}</strong>
+                <p>
+                  Authentication is owned by the Grok CLI; Nolira Build never stores
+                  or copies the account token.
+                </p>
+                <small>
+                  {provider.version ?? provider.state}
+                  {provider.models.length > 0
+                    ? ` · ${provider.models.length} models`
+                    : ""}
+                </small>
+              </div>
+              <RuntimeDot runtime={{ state: provider.state }} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === "skills" && (
+        <div className="integration-card-list compact-list">
+          {skills.map((skill) => (
+            <div className="integration-card" key={skill.id}>
+              <span className="integration-card-icon"><Icon name="spark" size={17} /></span>
+              <div>
+                <strong>{skill.name}</strong>
+                <p>{skill.description ?? "Installed skill"}</p>
+                <small>{skill.source}</small>
+              </div>
+            </div>
+          ))}
+          {skills.length === 0 && <div className="integration-empty">No skills found.</div>}
+        </div>
+      )}
+
+      {tab === "mcp" && (
+        <>
+          <div className="integration-card-list compact-list">
+            {servers.map((server) => (
+              <div className="integration-card integration-manage-row" key={server.id}>
+                <span className="integration-card-icon"><Icon name="terminal" size={17} /></span>
+                <div>
+                  <strong>{server.name}</strong>
+                  <p><code>{server.command} {server.args.join(" ")}</code></p>
+                </div>
+                <Toggle
+                  checked={server.enabled}
+                  onChange={(enabled) => void updateMcp(server, enabled)}
+                />
+                <button type="button" onClick={() => void removeMcp(server)} aria-label={`Remove ${server.name}`}>
+                  <Icon name="close" size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="integration-form">
+            <h3>Add stdio MCP server</h3>
+            <input placeholder="Name" value={mcpName} onChange={(event) => setMcpName(event.target.value)} />
+            <input placeholder="Command, e.g. npx" value={mcpCommand} onChange={(event) => setMcpCommand(event.target.value)} />
+            <textarea placeholder="Arguments, one per line" value={mcpArgs} onChange={(event) => setMcpArgs(event.target.value)} />
+            <button type="button" disabled={saving || !mcpName.trim() || !mcpCommand.trim()} onClick={() => void saveNewMcp()}>
+              Add MCP server
+            </button>
+          </div>
+        </>
+      )}
+
+      {tab === "memory" && (
+        <div className="integration-form memory-form">
+          <div className="integration-form-heading">
+            <div>
+              <h3>Workspace memory</h3>
+              <p>Injected as ACP session rules when a new session connects.</p>
+            </div>
+            <Toggle checked={memoryEnabled} onChange={setMemoryEnabled} />
+          </div>
+          <textarea
+            className="memory-editor"
+            placeholder="Repository conventions, verification expectations, and durable context…"
+            value={memoryContent}
+            onChange={(event) => setMemoryContent(event.target.value)}
+          />
+          <div className="integration-form-footer">
+            <small>{memory?.updatedAt && Date.parse(memory.updatedAt) > 0 ? `Last saved ${formatTime(memory.updatedAt)}` : "Not saved yet"}</small>
+            <button type="button" disabled={saving || !projectId} onClick={() => void saveMemory()}>
+              Save memory
+            </button>
+          </div>
+        </div>
+      )}
+
+      {tab === "automations" && (
+        <>
+          <div className="integration-card-list compact-list">
+            {automations.map((automation) => (
+              <div className="integration-card automation-row" key={automation.id}>
+                <span className="integration-card-icon"><Icon name="activity" size={17} /></span>
+                <div>
+                  <strong>{automation.name}</strong>
+                  <p>{automation.prompt}</p>
+                  <small>
+                    Every {automation.intervalMinutes} min
+                    {automation.nextRunAt ? ` · next ${formatTime(automation.nextRunAt)}` : ""}
+                  </small>
+                </div>
+                <div className="automation-actions">
+                  <button type="button" onClick={() => void runAutomationNow(automation)}>Run</button>
+                  <Toggle checked={automation.enabled} onChange={(enabled) => void updateAutomation(automation, enabled)} />
+                  <button type="button" onClick={() => void removeAutomation(automation)} aria-label={`Remove ${automation.name}`}>
+                    <Icon name="close" size={14} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="integration-form">
+            <h3>New recurring automation</h3>
+            <input placeholder="Name" value={automationName} onChange={(event) => setAutomationName(event.target.value)} />
+            <textarea placeholder="Prompt to run" value={automationPrompt} onChange={(event) => setAutomationPrompt(event.target.value)} />
+            <label className="automation-interval">
+              <span>Every</span>
+              <input type="number" min={5} max={10080} value={automationInterval} onChange={(event) => setAutomationInterval(Number(event.target.value))} />
+              <span>minutes</span>
+            </label>
+            <button type="button" disabled={saving || !projectId || !automationName.trim() || !automationPrompt.trim()} onClick={() => void saveNewAutomation()}>
+              Create automation
+            </button>
+          </div>
+        </>
+      )}
+    </section>
   )
 }
 

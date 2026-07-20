@@ -12,10 +12,12 @@ export type IconName =
   | "chevron-right"
   | "close"
   | "code"
+  | "compose"
   | "folder"
   | "folder-open"
   | "gear"
   | "image"
+  | "inbox"
   | "info"
   | "layout-left"
   | "layout-right"
@@ -52,6 +54,12 @@ const stroke: Record<IconName, ReactNode> = {
   "chevron-right": <path d="m9 18 6-6-6-6" />,
   close: <path d="m6 6 12 12M18 6 6 18" />,
   code: <path d="m8 9-4 3 4 3m8-6 4 3-4 3m-2-9-4 12" />,
+  compose: (
+    <>
+      <path d="M13 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
+      <path d="m17.5 3.5 3 3L11 16l-4 1 1-4 9.5-9.5Z" />
+    </>
+  ),
   folder: <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5v-11Z" />,
   "folder-open": <path d="M3 7h6l2 2h8.5a1.5 1.5 0 0 1 1.4 2l-2 6A1.5 1.5 0 0 1 17.5 18h-13A1.5 1.5 0 0 1 3 16.5V7Zm0 4h17" />,
   gear: (
@@ -65,6 +73,12 @@ const stroke: Record<IconName, ReactNode> = {
       <rect x="3" y="4" width="18" height="16" rx="2" />
       <circle cx="8.5" cy="9" r="1.5" />
       <path d="m21 15-5-5L5 20" />
+    </>
+  ),
+  inbox: (
+    <>
+      <path d="m4 4 16 0 2 9v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6l2-9Z" />
+      <path d="M2 13h5l2 3h6l2-3h5" />
     </>
   ),
   info: (
