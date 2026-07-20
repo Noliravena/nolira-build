@@ -75,6 +75,43 @@ lines.on('line', (line) => {
 })
 `
 
+const PLAN_AGENT = `#!/usr/bin/env node
+const readline = require('node:readline')
+const lines = readline.createInterface({ input: process.stdin })
+let promptRequestId
+const send = (value) => process.stdout.write(JSON.stringify(value) + '\\n')
+
+lines.on('line', (line) => {
+  const message = JSON.parse(line)
+  if (message.method === 'initialize') {
+    send({
+      jsonrpc: '2.0', id: message.id,
+      result: { agentCapabilities: { loadSession: true, promptCapabilities: {} } }
+    })
+    return
+  }
+  if (message.method === 'session/new') {
+    send({ jsonrpc: '2.0', id: message.id, result: { sessionId: 'plan-session' } })
+    return
+  }
+  if (message.method === 'session/prompt') {
+    promptRequestId = message.id
+    send({
+      jsonrpc: '2.0', id: 'plan-rpc', method: 'x.ai/exit_plan_mode',
+      params: { sessionId: 'plan-session', planContent: '# Plan\\n\\nImplement it.' }
+    })
+    return
+  }
+  if (message.id === 'plan-rpc' && message.result?.outcome === 'approved') {
+    send({
+      jsonrpc: '2.0', method: 'session/update',
+      params: { update: { sessionUpdate: 'agent_message_chunk', content: { text: 'PLAN_APPROVED' } } }
+    })
+    send({ jsonrpc: '2.0', id: promptRequestId, result: { stopReason: 'end_turn' } })
+  }
+})
+`
+
 describe('GrokAcpClient', () => {
   it('parks a server permission request and resumes with the selected option', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'nolira-acp-mock-'))
@@ -118,6 +155,53 @@ describe('GrokAcpClient', () => {
             payload: { usedTokens: 321 }
           }),
           expect.objectContaining({ type: 'completed' })
+        ])
+      )
+    } finally {
+      unsubscribe()
+      await client.shutdown()
+      await rm(directory, { force: true, recursive: true })
+    }
+  })
+
+  it('parks exit-plan mode until the desktop approves implementation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'nolira-acp-plan-'))
+    const executable = join(directory, 'grok-plan-mock')
+    await writeFile(executable, PLAN_AGENT)
+    await chmod(executable, 0o755)
+    const client = new GrokAcpClient({
+      taskId: 'plan-task',
+      cwd: directory,
+      executablePath: executable,
+      permissionMode: 'ask'
+    })
+    const events: GrokAcpEvent[] = []
+    const unsubscribe = client.onEvent((event) => {
+      events.push(event)
+      if (
+        event.type === 'permission-request' &&
+        event.payload.toolName === 'Plan approval'
+      ) {
+        void client.respondPermission({
+          requestId: event.payload.requestId,
+          optionId: 'plan-approve'
+        })
+      }
+    })
+
+    try {
+      await client.start()
+      await client.prompt({ text: 'plan this change' })
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'permission-request',
+            payload: expect.objectContaining({ toolName: 'Plan approval' })
+          }),
+          expect.objectContaining({
+            type: 'message-delta',
+            payload: { text: 'PLAN_APPROVED' }
+          })
         ])
       )
     } finally {

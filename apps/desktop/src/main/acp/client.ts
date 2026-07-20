@@ -21,6 +21,11 @@ import type {
   GrokToolStatus,
   JsonValue,
 } from '../../shared/acp'
+import type {
+  BackgroundTaskState,
+  GoalState,
+  SubagentState
+} from '../../shared/models'
 import { buildPromptBlocks } from './attachments'
 import { GrokAcpError, GrokAcpTimeoutError } from './errors'
 import { resolveGrokExecutable } from './executable'
@@ -49,6 +54,10 @@ interface PendingPermission {
   options: GrokPermissionOption[]
 }
 
+interface PendingPlanApproval {
+  rpcId: JsonRpcId
+}
+
 interface InitializeState {
   capabilities: GrokAgentCapabilities
   models: GrokModelOption[]
@@ -64,6 +73,7 @@ export class GrokAcpClient {
   private readonly options: GrokConnectRequest
   private readonly pending = new Map<string, PendingRpc>()
   private readonly pendingPermissions = new Map<string, PendingPermission>()
+  private readonly pendingPlanApprovals = new Map<string, PendingPlanApproval>()
   private child?: ChildProcessWithoutNullStreams
   private stdoutLines?: ReadlineInterface
   private stderrLines?: ReadlineInterface
@@ -170,7 +180,14 @@ export class GrokAcpClient {
 
   async newSession(cwd = this.cwd, emitReady = true): Promise<JsonValue> {
     this.cwd = cwd
-    const params: Record<string, JsonValue> = { cwd, mcpServers: [] }
+    const params: Record<string, JsonValue> = {
+      cwd,
+      mcpServers: (this.options.mcpServers ?? []).map((server) => ({
+        name: server.name,
+        command: server.command,
+        args: server.args
+      }))
+    }
     const metadata: Record<string, JsonValue> = {}
     if (this.options.rules) metadata.rules = this.options.rules
     if (this.options.systemPromptOverride) {
@@ -201,7 +218,11 @@ export class GrokAcpClient {
     const result = await this.request('session/load', {
       sessionId,
       cwd,
-      mcpServers: [],
+      mcpServers: (this.options.mcpServers ?? []).map((server) => ({
+        name: server.name,
+        command: server.command,
+        args: server.args
+      })),
     })
     this.ingestSessionState(result, sessionId)
     if (emitReady) this.emitReady()
@@ -279,6 +300,22 @@ export class GrokAcpClient {
 
   async respondPermission(response: GrokPermissionResponse): Promise<void> {
     const parked = this.pendingPermissions.get(response.requestId)
+    const planApproval = this.pendingPlanApprovals.get(response.requestId)
+    if (planApproval) {
+      const outcome = response.optionId === 'plan-abandon'
+        ? 'abandoned'
+        : response.optionId === 'plan-revise'
+          ? 'cancelled'
+          : 'approved'
+      this.pendingPlanApprovals.delete(response.requestId)
+      this.write({
+        jsonrpc: '2.0',
+        id: planApproval.rpcId,
+        result: { outcome }
+      })
+      this.emitStatus('busy', 'Plan response sent')
+      return
+    }
     if (!parked) {
       throw new GrokAcpError(`Permission request is no longer pending: ${response.requestId}`)
     }
@@ -301,6 +338,7 @@ export class GrokAcpClient {
     this.stderrLines?.close()
     this.failPending(new GrokAcpError('Grok agent stopped.'))
     this.pendingPermissions.clear()
+    this.pendingPlanApprovals.clear()
 
     const child = this.child
     this.child = undefined
@@ -385,8 +423,89 @@ export class GrokAcpClient {
       this.mapSessionUpdate(params)
       return
     }
+    if (
+      method === 'x.ai/session_notification' ||
+      method.endsWith('/session_notification') ||
+      method.endsWith('/task_backgrounded') ||
+      method.endsWith('/task_completed') ||
+      method.endsWith('/monitor_event')
+    ) {
+      const paramsRecord = asRecord(params)
+      const rawUpdate = asRecord(paramsRecord?.update) ?? paramsRecord ?? {}
+      const update = { ...rawUpdate }
+      if (!update.sessionUpdate && !update.session_update && !update.type) {
+        if (method.endsWith('/task_backgrounded')) update.sessionUpdate = 'task_backgrounded'
+        if (method.endsWith('/task_completed')) update.sessionUpdate = 'task_completed'
+        if (method.endsWith('/monitor_event')) update.sessionUpdate = 'monitor_event'
+      }
+      const sessionId =
+        readString(paramsRecord, 'sessionId') ??
+        readString(paramsRecord, 'session_id') ??
+        this.sessionId ??
+        'unknown'
+      for (const mapped of mapExtendedUpdate(update, sessionId)) {
+        this.emit({
+          type: mapped.type,
+          taskId: this.taskId,
+          payload: mapped.payload,
+          timestamp: Date.now()
+        } as GrokAcpEvent)
+      }
+      if (isJsonRpcRequest(message)) {
+        this.write({ jsonrpc: '2.0', id: message.id, result: {} })
+      }
+      return
+    }
     if (method === 'session/request_permission' || method === 'request_permission') {
       if (isJsonRpcRequest(message)) await this.handlePermission(message.id, params)
+      return
+    }
+    if (
+      (method === 'x.ai/exit_plan_mode' ||
+        method === 'exit_plan_mode' ||
+        method.endsWith('/exit_plan_mode')) &&
+      isJsonRpcRequest(message)
+    ) {
+      const record = asRecord(params)
+      const requestId = randomUUID()
+      this.pendingPlanApprovals.set(requestId, { rpcId: message.id })
+      const planContent =
+        readString(record, 'planContent') ?? readString(record, 'plan_content')
+      this.emit({
+        type: 'permission-request',
+        taskId: this.taskId,
+        payload: {
+          requestId,
+          sessionId:
+            readString(record, 'sessionId') ??
+            readString(record, 'session_id') ??
+            this.sessionId,
+          toolCallId:
+            readString(record, 'toolCallId') ?? readString(record, 'tool_call_id'),
+          toolName: 'Plan approval',
+          summary: 'Grok is ready to implement the plan',
+          detail: planContent,
+          options: [
+            {
+              optionId: 'plan-approve',
+              name: 'Approve and implement',
+              kind: 'allow_once'
+            },
+            {
+              optionId: 'plan-revise',
+              name: 'Keep planning',
+              kind: 'reject_once'
+            },
+            {
+              optionId: 'plan-abandon',
+              name: 'Abandon plan',
+              kind: 'reject_always'
+            }
+          ]
+        },
+        timestamp: Date.now()
+      })
+      this.emitStatus('waiting-permission', 'Plan approval required')
       return
     }
 
@@ -407,6 +526,19 @@ export class GrokAcpClient {
     const update = asRecord(paramsRecord?.update) ?? paramsRecord
     if (!update) return
     const kind = readString(update, 'sessionUpdate') ?? readString(update, 'session_update')
+
+    const extended = mapExtendedUpdate(update, this.sessionId ?? 'unknown')
+    if (extended.length > 0) {
+      for (const mapped of extended) {
+        this.emit({
+          type: mapped.type,
+          taskId: this.taskId,
+          payload: mapped.payload,
+          timestamp: Date.now()
+        } as GrokAcpEvent)
+      }
+      return
+    }
 
     switch (kind) {
       case 'agent_message_chunk': {
@@ -587,6 +719,242 @@ export class GrokAcpClient {
     if (!this.sessionId) throw new GrokAcpError('Grok ACP session is not ready.')
     return this.sessionId
   }
+}
+
+export type ExtendedUpdateEvent =
+  | { type: 'goal-updated'; payload: GoalState }
+  | { type: 'subagent-updated'; payload: SubagentState }
+  | { type: 'background-task-updated'; payload: BackgroundTaskState }
+
+export function mapExtendedUpdate(
+  update: Record<string, unknown>,
+  sessionId: string,
+  timestamp = Date.now()
+): ExtendedUpdateEvent[] {
+  const rawKind = firstString(update, 'sessionUpdate', 'session_update', 'type') ?? ''
+  const kind = rawKind.replace(/([a-z])([A-Z])/g, '$1_$2').toLocaleLowerCase()
+  const updatedAt = new Date(timestamp).toISOString()
+
+  if (kind === 'goal_updated') {
+    const objective = firstString(update, 'objective', 'title') ?? ''
+    return [{
+      type: 'goal-updated',
+      payload: {
+        id: firstString(update, 'goal_id', 'goalId'),
+        objective,
+        status: mapGoalStatus(firstString(update, 'status')),
+        phase: firstString(update, 'phase'),
+        elapsedMs: firstNumber(update, 'elapsed_ms', 'elapsedMs'),
+        lastEvent: firstString(update, 'last_event', 'lastEvent'),
+        message: firstString(update, 'message'),
+        updatedAt
+      }
+    }]
+  }
+
+  if (
+    kind === 'subagent_spawned' ||
+    kind === 'subagent_progress' ||
+    kind === 'subagent_finished'
+  ) {
+    const id = firstString(update, 'subagent_id', 'subagentId')
+    if (!id) return []
+    const phase = kind === 'subagent_spawned'
+      ? 'spawned'
+      : kind === 'subagent_progress'
+        ? 'progress'
+        : 'finished'
+    const durationMs = firstNumber(update, 'duration_ms', 'durationMs')
+    const turnCount = firstNumber(update, 'turns', 'turn_count', 'turnCount')
+    const toolCallCount = firstNumber(
+      update,
+      'tool_calls',
+      'tool_call_count',
+      'toolCallCount'
+    )
+    const output = firstString(update, 'output')
+    const error = firstString(update, 'error')
+    const progressDescription = [
+      turnCount === undefined ? undefined : `${turnCount} turns`,
+      toolCallCount === undefined ? undefined : `${toolCallCount} tools`,
+      durationMs === undefined ? undefined : `${Math.round(durationMs / 1_000)}s`
+    ].filter(Boolean).join(' · ')
+    return [{
+      type: 'subagent-updated',
+      payload: {
+        id,
+        parentSessionId:
+          firstString(update, 'parent_session_id', 'parentSessionId') ?? sessionId,
+        childSessionId:
+          firstString(update, 'child_session_id', 'childSessionId') ?? id,
+        type: firstString(update, 'subagent_type', 'subagentType'),
+        description:
+          firstString(update, 'description') ??
+          error ??
+          (output ? output.slice(0, 240) : undefined) ??
+          (progressDescription || undefined),
+        phase,
+        status: firstString(update, 'status') ?? (phase === 'finished' ? 'completed' : 'working'),
+        durationMs,
+        turnCount,
+        toolCallCount,
+        tokensUsed: firstNumber(update, 'tokens_used', 'tokensUsed'),
+        error,
+        output,
+        updatedAt
+      }
+    }]
+  }
+
+  if (kind === 'task_backgrounded') {
+    const id = firstString(update, 'task_id', 'taskId')
+    if (!id) return []
+    const rawCommand = firstString(update, 'command')
+    const monitorDescription = firstString(
+      update,
+      'monitor_description',
+      'monitorDescription'
+    )
+    const isMonitor = Boolean(monitorDescription || rawCommand?.startsWith('[monitor] '))
+    const command = isMonitor && rawCommand?.startsWith('[monitor] ')
+      ? rawCommand.slice('[monitor] '.length)
+      : rawCommand
+    return [{
+      type: 'background-task-updated',
+      payload: {
+        id,
+        phase: 'backgrounded',
+        command,
+        description:
+          firstString(update, 'description') ?? monitorDescription ?? command,
+        cwd: firstString(update, 'cwd'),
+        outputFile: firstString(update, 'output_file', 'outputFile'),
+        toolCallId: firstString(update, 'tool_call_id', 'toolCallId'),
+        isMonitor,
+        updatedAt
+      }
+    }]
+  }
+
+  if (kind === 'task_completed') {
+    const snapshot =
+      asRecord(update.task_snapshot) ?? asRecord(update.taskSnapshot) ?? update
+    const id =
+      firstString(snapshot, 'task_id', 'taskId') ??
+      firstString(update, 'task_id', 'taskId')
+    if (!id) return []
+    const exitCode = firstNumber(snapshot, 'exit_code', 'exitCode')
+    const signal = firstString(snapshot, 'signal') ?? firstString(update, 'signal')
+    const start = firstTime(snapshot, 'start_time', 'startTime')
+    const end = firstTime(snapshot, 'end_time', 'endTime')
+    const durationMs =
+      start !== undefined && end !== undefined && end >= start ? end - start : undefined
+    const command = firstString(
+      snapshot,
+      'display_command',
+      'displayCommand',
+      'command'
+    ) ?? firstString(update, 'command')
+    const output = firstString(snapshot, 'output')
+    return [{
+      type: 'background-task-updated',
+      payload: {
+        id,
+        phase: 'completed',
+        command,
+        description: command,
+        cwd: firstString(snapshot, 'cwd'),
+        outputFile: firstString(snapshot, 'output_file', 'outputFile'),
+        toolCallId: firstString(snapshot, 'tool_call_id', 'toolCallId'),
+        isMonitor: firstString(snapshot, 'kind')?.toLocaleLowerCase() === 'monitor',
+        exitCode: exitCode ?? null,
+        signal,
+        success: exitCode === 0 || (exitCode === undefined && !signal),
+        willWake: Boolean(update.will_wake ?? update.willWake),
+        durationMs,
+        output: output?.slice(0, 4_000),
+        staleOnLoad: signal === 'session_restart',
+        updatedAt
+      }
+    }]
+  }
+
+  if (kind === 'monitor_event') {
+    const id = firstString(update, 'task_id', 'taskId')
+    if (!id) return []
+    return [{
+      type: 'background-task-updated',
+      payload: {
+        id,
+        phase: 'monitor',
+        description: firstString(update, 'description'),
+        eventText: firstString(update, 'event_text', 'eventText'),
+        isMonitor: true,
+        updatedAt
+      }
+    }]
+  }
+
+  return []
+}
+
+function mapGoalStatus(value: string | undefined): GoalState['status'] {
+  switch (value?.toLocaleLowerCase()) {
+    case 'user_paused':
+    case 'paused':
+      return 'paused'
+    case 'complete':
+    case 'completed':
+      return 'completed'
+    case 'cleared':
+    case 'cancelled':
+    case 'canceled':
+      return 'cancelled'
+    case 'failed':
+    case 'error':
+      return 'error'
+    default:
+      return 'active'
+  }
+}
+
+function firstString(
+  record: Record<string, unknown>,
+  ...keys: string[]
+): string | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  return undefined
+}
+
+function firstNumber(
+  record: Record<string, unknown>,
+  ...keys: string[]
+): number | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+    if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) {
+      return Number(value)
+    }
+  }
+  return undefined
+}
+
+function firstTime(
+  record: Record<string, unknown>,
+  ...keys: string[]
+): number | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+    if (typeof value === 'string' && Number.isFinite(Date.parse(value))) {
+      return Date.parse(value)
+    }
+  }
+  return undefined
 }
 
 function parseInitializeState(result: JsonValue): InitializeState {
