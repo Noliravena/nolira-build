@@ -1,3 +1,9 @@
+import type {
+  BackgroundTaskState,
+  GoalState,
+  SubagentState
+} from './models'
+
 export type JsonValue =
   | null
   | boolean
@@ -25,6 +31,13 @@ export interface GrokConnectRequest {
   clientInfo?: GrokClientInfo
   rules?: string
   systemPromptOverride?: string
+  mcpServers?: GrokMcpServerConfig[]
+}
+
+export interface GrokMcpServerConfig {
+  name: string
+  command: string
+  args: string[]
 }
 
 export interface GrokPromptAttachment {
@@ -147,6 +160,9 @@ export type GrokAcpEvent =
   | GrokEventBase<'tool-updated', { tool: GrokToolActivity }>
   | GrokEventBase<'plan', { steps: string[] }>
   | GrokEventBase<'context-usage', { usedTokens: number }>
+  | GrokEventBase<'goal-updated', GoalState>
+  | GrokEventBase<'subagent-updated', SubagentState>
+  | GrokEventBase<'background-task-updated', BackgroundTaskState>
   | GrokEventBase<'permission-request', GrokPermissionRequest>
   | GrokEventBase<'completed', GrokPromptResult>
   | GrokEventBase<'cancelled', Record<string, never>>
