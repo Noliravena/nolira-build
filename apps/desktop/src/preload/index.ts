@@ -1,5 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+import type {
+  HostMethod,
+  HostParams,
+  HostResponse,
+  HostResult
+} from '../shared/host-api'
+
 type EventListener = (event: unknown) => void
 
 const channels = {
@@ -14,6 +21,7 @@ const channels = {
   pickAttachments: 'nolira:pick-attachments',
   updateSettings: 'nolira:update-settings',
   openPath: 'nolira:open-path',
+  host: 'nolira:host',
   event: 'nolira:event',
   windowControl: 'nolira:window-control'
 } as const
@@ -41,6 +49,11 @@ const api = Object.freeze({
     ipcRenderer.invoke(channels.updateSettings, patch),
   openPath: (path: string): Promise<void> =>
     ipcRenderer.invoke(channels.openPath, path),
+  invoke: <M extends HostMethod>(
+    method: M,
+    params: HostParams<M>
+  ): Promise<HostResponse<HostResult<M>>> =>
+    ipcRenderer.invoke(channels.host, { method, params }),
   onEvent: (callback: EventListener): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown): void => {
       callback(payload)

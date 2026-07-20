@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { extname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import {
@@ -26,6 +26,24 @@ import type {
   GrokPermissionResponse,
   GrokPromptRequest
 } from '../shared/acp'
+import type {
+  HostMethod,
+  HostResponse,
+  NormalizedEvent,
+  SessionListParams,
+  SessionSummary
+} from '../shared/host-api'
+import type { AutomationDefinition, RuntimeStatus } from '../shared/models'
+import { IntegrationStore } from './integrations'
+import { SessionIndexService } from './sessions'
+import {
+  discoverSkills,
+  listWorkspaceChanges,
+  listWorkspaceFiles,
+  readWorkspaceFile,
+  workspaceDiff,
+  writeWorkspaceFile
+} from './workspace'
 import {
   DesktopStore,
   type AppSettingsRecord,
@@ -44,6 +62,10 @@ if (userDataOverride) {
   app.setPath('userData', userDataPath)
 }
 
+// Keep Chromium's renderer accessibility tree available to VoiceOver and
+// keyboard-assistive tooling even before an OS accessibility client connects.
+app.commandLine.appendSwitch('force-renderer-accessibility')
+
 const execFileAsync = promisify(execFile)
 
 const channels = {
@@ -58,16 +80,10 @@ const channels = {
   pickAttachments: 'nolira:pick-attachments',
   updateSettings: 'nolira:update-settings',
   openPath: 'nolira:open-path',
+  host: 'nolira:host',
   event: 'nolira:event',
   windowControl: 'nolira:window-control'
 } as const
-
-type RuntimeStatus = {
-  state: 'checking' | 'ready' | 'offline' | 'error'
-  version?: string
-  message?: string
-  binaryPath?: string
-}
 
 type AcpManager = {
   connect: (request: GrokConnectRequest) => Promise<unknown>
@@ -79,27 +95,6 @@ type AcpManager = {
   onEvent: (listener: GrokAcpEventListener) => void | (() => void)
 }
 
-type AgentEvent =
-  | { type: 'snapshot'; payload: unknown }
-  | { type: 'workspace.updated'; payload: unknown }
-  | { type: 'task.updated'; taskId: string; payload: unknown }
-  | { type: 'message.updated'; taskId: string; payload: unknown }
-  | {
-      type: 'message.delta'
-      taskId: string
-      payload: {
-        messageId: string
-        partId: string
-        partType: 'text' | 'thinking'
-        delta: string
-      }
-    }
-  | { type: 'permission.request'; taskId: string; payload: unknown }
-  | { type: 'permission.resolved'; taskId: string; payload: unknown }
-  | { type: 'runtime.status'; payload: RuntimeStatus }
-  | { type: 'models.updated'; payload: string[] }
-  | { type: 'error'; taskId?: string; payload: { message: string; detail?: string } }
-
 type PendingAssistant = {
   messageId: string
   thinkingPartId: string
@@ -108,17 +103,21 @@ type PendingAssistant = {
 
 let mainWindow: BrowserWindow | null = null
 let store: DesktopStore
+let sessionIndex: SessionIndexService
+let integrations: IntegrationStore
 let manager: AcpManager | null = null
 let removeManagerListener: (() => void) | undefined
 let runtimeStatus: RuntimeStatus = { state: 'checking' }
 let availableModels: string[] = []
+let automationTimer: NodeJS.Timeout | undefined
 
 const connectedTasks = new Set<string>()
 const pendingAssistants = new Map<string, PendingAssistant>()
 const allowedAttachmentPaths = new Set<string>()
 const allowedWorkspacePaths = new Set<string>()
+const runningAutomations = new Set<string>()
 
-function emit(event: AgentEvent): void {
+function emit(event: NormalizedEvent): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
   mainWindow.webContents.send(channels.event, event)
 }
@@ -319,6 +318,7 @@ async function checkRuntime(): Promise<RuntimeStatus> {
 function registerIpc(): void {
   ipcMain.handle(channels.bootstrap, async (event) => {
     assertTrustedSender(event)
+    await refreshIndexedSessions({}, false)
     return {
       ...store.snapshot(),
       runtime: await checkRuntime(),
@@ -357,6 +357,7 @@ function registerIpc(): void {
     })
     allowedWorkspacePaths.delete(path)
     emit({ type: 'workspace.updated', payload: store.listProjects() })
+    await refreshIndexedSessions()
     return project
   })
 
@@ -373,7 +374,7 @@ function registerIpc(): void {
 
   ipcMain.handle(channels.selectTask, async (event, taskId: unknown) => {
     assertTrustedSender(event)
-    return store.selectTask(expectIdentifier(taskId, 'taskId'))
+    return selectAndHydrateTask(expectIdentifier(taskId, 'taskId'))
   })
 
   ipcMain.handle(channels.sendPrompt, async (event, input: unknown) => {
@@ -395,6 +396,16 @@ function registerIpc(): void {
     const requestId = expectIdentifier(record.requestId, 'requestId')
     const optionId = expectIdentifier(record.optionId, 'optionId')
     await (await getManager()).respondPermission({ requestId, optionId })
+    const taskId = store.listInbox().find((item) => item.sourceId === requestId)?.taskId
+    const inbox = await store.dismissInboxBySource(requestId)
+    emit({ type: 'inbox.updated', payload: inbox })
+    if (taskId) {
+      emit({
+        type: 'permission.resolved',
+        taskId,
+        payload: { requestId }
+      })
+    }
   })
 
   ipcMain.handle(channels.pickAttachments, async (event) => {
@@ -454,6 +465,57 @@ function registerIpc(): void {
     if (failure) throw new Error(failure)
   })
 
+  ipcMain.handle(channels.host, async (event, input: unknown) => {
+    assertTrustedSender(event)
+    try {
+      const record = expectRecord(input)
+      const method = expectEnum(
+        record.method,
+        [
+          'sessions.list',
+          'sessions.refresh',
+          'sessions.loadHistory',
+          'sessions.continueRecent',
+          'sessions.rename',
+          'sessions.archive',
+          'sessions.exportMarkdown',
+          'workspace.files',
+          'workspace.readFile',
+          'workspace.writeFile',
+          'workspace.changes',
+          'workspace.diff',
+          'skills.list',
+          'attachments.importData',
+          'inbox.list',
+          'inbox.markRead',
+          'inbox.markAllRead',
+          'inbox.dismiss',
+          'providers.list',
+          'mcp.list',
+          'mcp.save',
+          'mcp.remove',
+          'memory.get',
+          'memory.set',
+          'automations.list',
+          'automations.save',
+          'automations.remove',
+          'automations.runNow'
+        ],
+        'method'
+      )
+      const data = await handleHostRequest(method, record.params)
+      return { ok: true, data } satisfies HostResponse<unknown>
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          code: hostErrorCode(error),
+          message: errorMessage(error)
+        }
+      } satisfies HostResponse<unknown>
+    }
+  })
+
   ipcMain.handle(
     channels.windowControl,
     (event: IpcMainInvokeEvent, input: unknown) => {
@@ -469,6 +531,459 @@ function registerIpc(): void {
       if (action === 'close') owner.close()
     }
   )
+}
+
+async function handleHostRequest(
+  method: HostMethod,
+  input: unknown
+): Promise<unknown> {
+  const record = expectRecord(input)
+
+  switch (method) {
+    case 'sessions.list': {
+      const params = parseSessionListParams(record)
+      return { sessions: linkSessionTasks(sessionIndex.list(params)) }
+    }
+    case 'sessions.refresh':
+      return refreshIndexedSessions(parseSessionListParams(record))
+    case 'sessions.loadHistory': {
+      const sessionId = expectIdentifier(record.sessionId, 'sessionId')
+      const task = store.findTaskBySessionId(sessionId)
+      const page = await sessionIndex.loadHistory(sessionId, task?.id ?? sessionId)
+      if (task) {
+        const hydrated = await store.replaceMessages(task.id, page.messages)
+        emit({ type: 'task.updated', taskId: task.id, payload: hydrated })
+      }
+      return page
+    }
+    case 'sessions.continueRecent': {
+      const projectId = optionalProjectId(record.projectId)
+      const session = sessionIndex.list({ projectId, limit: 1 })[0]
+      if (!session) return { task: null }
+      const task = store.findTaskBySessionId(session.sessionId)
+      if (!task) throw new Error('Indexed session task does not exist.')
+      const hydrated = await selectAndHydrateTask(task.id)
+      emit({ type: 'task.updated', taskId: hydrated.id, payload: hydrated })
+      return { task: hydrated }
+    }
+    case 'sessions.rename': {
+      const sessionId = expectIdentifier(record.sessionId, 'sessionId')
+      const title = expectString(record.title, 'title').slice(0, 160)
+      const session = await sessionIndex.rename(sessionId, title)
+      const task = await ensureSessionTask(session)
+      const updated = await store.updateTask(task.id, { title: session.title })
+      emit({ type: 'task.updated', taskId: updated.id, payload: updated })
+      emit({ type: 'sessions.indexed', payload: linkSessionTasks(sessionIndex.list({})) })
+      return { task: updated }
+    }
+    case 'sessions.archive': {
+      const sessionId = expectIdentifier(record.sessionId, 'sessionId')
+      const archived = expectBoolean(record.archived, 'archived')
+      const session = await sessionIndex.archive(sessionId, archived)
+      const task = await ensureSessionTask(session)
+      const updated = await store.updateTask(task.id, { archived })
+      emit({ type: 'task.updated', taskId: updated.id, payload: updated })
+      emit({ type: 'sessions.indexed', payload: linkSessionTasks(sessionIndex.list({})) })
+      return { task: updated }
+    }
+    case 'sessions.exportMarkdown':
+      return sessionIndex.exportMarkdown(
+        expectIdentifier(record.sessionId, 'sessionId')
+      )
+    case 'workspace.files': {
+      const projectId = expectIdentifier(record.projectId, 'projectId')
+      const project = store.getProject(projectId)
+      if (!project) throw new Error('Project does not exist.')
+      const query = optionalString(record.query, 'query', true) ?? ''
+      const limit = optionalFiniteInteger(record.limit, 'limit') ?? 40
+      return {
+        files: await listWorkspaceFiles(project.path, query, limit)
+      }
+    }
+    case 'workspace.readFile': {
+      const project = requireProject(record.projectId)
+      return readWorkspaceFile(
+        project.path,
+        expectString(record.path, 'path')
+      )
+    }
+    case 'workspace.writeFile': {
+      const project = requireProject(record.projectId)
+      if (
+        typeof record.expectedMtimeMs !== 'number' ||
+        !Number.isFinite(record.expectedMtimeMs)
+      ) {
+        throw new Error('expectedMtimeMs must be a finite number.')
+      }
+      return writeWorkspaceFile(
+        project.path,
+        expectString(record.path, 'path'),
+        expectString(record.content, 'content', true),
+        record.expectedMtimeMs
+      )
+    }
+    case 'workspace.changes': {
+      const project = requireProject(record.projectId)
+      return listWorkspaceChanges(project.path)
+    }
+    case 'workspace.diff': {
+      const project = requireProject(record.projectId)
+      const staged =
+        record.staged === undefined
+          ? false
+          : expectBoolean(record.staged, 'staged')
+      return workspaceDiff(
+        project.path,
+        expectString(record.path, 'path'),
+        staged
+      )
+    }
+    case 'skills.list': {
+      const projectId = optionalProjectId(record.projectId)
+      const project = projectId ? store.getProject(projectId) : undefined
+      return {
+        skills: await discoverSkills({
+          projectPath: project?.path,
+          query: optionalString(record.query, 'query')
+        })
+      }
+    }
+    case 'attachments.importData':
+      return {
+        attachment: await importPastedAttachment(record)
+      }
+    case 'inbox.list':
+      return { items: store.listInbox() }
+    case 'inbox.markRead': {
+      const items = await store.markInboxRead(
+        expectIdentifier(record.id, 'id'),
+        record.read === undefined ? true : expectBoolean(record.read, 'read')
+      )
+      emit({ type: 'inbox.updated', payload: items })
+      return { items }
+    }
+    case 'inbox.markAllRead': {
+      const items = await store.markAllInboxRead()
+      emit({ type: 'inbox.updated', payload: items })
+      return { items }
+    }
+    case 'inbox.dismiss': {
+      const items = await store.dismissInbox(expectIdentifier(record.id, 'id'))
+      emit({ type: 'inbox.updated', payload: items })
+      return { items }
+    }
+    case 'providers.list':
+      return {
+        providers: [
+          {
+            id: 'grok-acp',
+            name: 'Grok ACP',
+            kind: 'grok-acp',
+            authOwner: 'grok-cli',
+            state: runtimeStatus.state,
+            version: runtimeStatus.version,
+            binaryPath: runtimeStatus.binaryPath,
+            models: availableModels
+          }
+        ]
+      }
+    case 'mcp.list':
+      return { servers: integrations.listMcpServers() }
+    case 'mcp.save': {
+      const servers = await integrations.saveMcpServer({
+        id: optionalString(record.id, 'id'),
+        name: expectString(record.name, 'name').trim().slice(0, 100),
+        command: expectString(record.command, 'command').trim().slice(0, 1_000),
+        args: parseStringArray(record.args, 'args', 100, 2_000),
+        enabled: expectBoolean(record.enabled, 'enabled')
+      })
+      return { servers }
+    }
+    case 'mcp.remove':
+      return {
+        servers: await integrations.removeMcpServer(
+          expectIdentifier(record.id, 'id')
+        )
+      }
+    case 'memory.get': {
+      const project = requireProject(record.projectId)
+      return { memory: integrations.getMemory(project.id) }
+    }
+    case 'memory.set': {
+      const project = requireProject(record.projectId)
+      const content = expectString(record.content, 'content', true)
+      if (content.length > 100_000) {
+        throw new Error('Workspace memory cannot exceed 100,000 characters.')
+      }
+      return {
+        memory: await integrations.setMemory({
+          projectId: project.id,
+          enabled: expectBoolean(record.enabled, 'enabled'),
+          content
+        })
+      }
+    }
+    case 'automations.list':
+      return { automations: integrations.listAutomations() }
+    case 'automations.save': {
+      const project = requireProject(record.projectId)
+      const intervalMinutes = optionalFiniteInteger(
+        record.intervalMinutes,
+        'intervalMinutes'
+      )
+      if (
+        intervalMinutes === undefined ||
+        intervalMinutes < 5 ||
+        intervalMinutes > 10_080
+      ) {
+        throw new Error('Automation interval must be between 5 and 10,080 minutes.')
+      }
+      const automations = await integrations.saveAutomation({
+        id: optionalString(record.id, 'id'),
+        name: expectString(record.name, 'name').trim().slice(0, 120),
+        projectId: project.id,
+        prompt: expectString(record.prompt, 'prompt').slice(0, 100_000),
+        intervalMinutes,
+        enabled: expectBoolean(record.enabled, 'enabled')
+      })
+      emit({ type: 'automations.updated', payload: automations })
+      return { automations }
+    }
+    case 'automations.remove': {
+      const automations = await integrations.removeAutomation(
+        expectIdentifier(record.id, 'id')
+      )
+      emit({ type: 'automations.updated', payload: automations })
+      return { automations }
+    }
+    case 'automations.runNow':
+      return runAutomation(expectIdentifier(record.id, 'id'))
+  }
+}
+
+async function refreshIndexedSessions(
+  params: SessionListParams = {},
+  emitUpdates = true
+): Promise<{ sessions: SessionSummary[]; tasks: TaskRecord[] }> {
+  const discovered = await sessionIndex.refresh(store.listProjects())
+  const indexedTasks = await store.syncIndexedSessions(discovered)
+  const sessions = linkSessionTasks(sessionIndex.list(params))
+
+  if (emitUpdates) {
+    for (const task of indexedTasks) {
+      emit({ type: 'task.updated', taskId: task.id, payload: task })
+    }
+    emit({ type: 'sessions.indexed', payload: sessions })
+  }
+
+  return { sessions, tasks: indexedTasks }
+}
+
+function linkSessionTasks(sessions: SessionSummary[]): SessionSummary[] {
+  return sessions.map((session) => ({
+    ...session,
+    taskId: store.findTaskBySessionId(session.sessionId)?.id
+  }))
+}
+
+async function ensureSessionTask(session: SessionSummary): Promise<TaskRecord> {
+  const existing = store.findTaskBySessionId(session.sessionId)
+  if (existing) return existing
+  const [created] = await store.syncIndexedSessions([session])
+  if (!created) throw new Error('Unable to create an indexed session task.')
+  return created
+}
+
+async function selectAndHydrateTask(taskId: string): Promise<TaskRecord> {
+  let task = await store.selectTask(taskId)
+  if (!task.sessionId || !sessionIndex.get(task.sessionId)) return task
+
+  const history = await sessionIndex.loadHistory(task.sessionId, task.id)
+  task = await store.replaceMessages(task.id, history.messages)
+  return task
+}
+
+function parseSessionListParams(record: Record<string, unknown>): SessionListParams {
+  const projectId = optionalProjectId(record.projectId)
+  const query = optionalString(record.query, 'query')
+  const includeArchived =
+    record.includeArchived === undefined
+      ? undefined
+      : expectBoolean(record.includeArchived, 'includeArchived')
+  const limit = optionalFiniteInteger(record.limit, 'limit')
+  return { projectId, query, includeArchived, limit }
+}
+
+async function importPastedAttachment(
+  record: Record<string, unknown>
+): Promise<AttachmentRecord> {
+  const mimeType = expectEnum(
+    record.mimeType,
+    ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif', 'image/heic'],
+    'mimeType'
+  )
+  const dataBase64 = expectString(record.dataBase64, 'dataBase64')
+  if (
+    dataBase64.length > 12_000_000 ||
+    dataBase64.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(dataBase64)
+  ) {
+    throw new Error('Pasted image data is invalid or too large.')
+  }
+  const bytes = Buffer.from(dataBase64, 'base64')
+  if (bytes.byteLength === 0 || bytes.byteLength > 8 * 1024 * 1024) {
+    throw new Error('Pasted images must be between 1 byte and 8 MB.')
+  }
+
+  const extension = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+    'image/avif': 'avif',
+    'image/heic': 'heic'
+  }[mimeType]
+  const rawName = expectString(record.name, 'name')
+  const safeName = rawName.replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 120)
+  const directory = join(app.getPath('temp'), `nolira-build-paste-${process.pid}`)
+  await mkdir(directory, { recursive: true })
+  const path = join(directory, `${randomUUID()}.${extension}`)
+  await writeFile(path, bytes, { mode: 0o600 })
+  allowedAttachmentPaths.add(path)
+  return {
+    id: randomUUID(),
+    name: safeName || `pasted-image.${extension}`,
+    path,
+    mimeType,
+    size: bytes.byteLength
+  }
+}
+
+function optionalFiniteInteger(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`${field} must be a finite number.`)
+  }
+  return Math.trunc(value)
+}
+
+function parseStringArray(
+  value: unknown,
+  field: string,
+  maxItems: number,
+  maxLength: number
+): string[] {
+  if (!Array.isArray(value) || value.length > maxItems) {
+    throw new Error(`${field} must be an array with at most ${maxItems} items.`)
+  }
+  return value.map((item, index) =>
+    expectString(item, `${field}[${index}]`, true).slice(0, maxLength)
+  )
+}
+
+function optionalProjectId(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  const projectId = expectIdentifier(value, 'projectId')
+  if (!store.getProject(projectId)) throw new Error('Project does not exist.')
+  return projectId
+}
+
+function requireProject(value: unknown) {
+  const projectId = expectIdentifier(value, 'projectId')
+  const project = store.getProject(projectId)
+  if (!project) throw new Error('Project does not exist.')
+  return project
+}
+
+function hostErrorCode(error: unknown): string {
+  const message = errorMessage(error).toLocaleLowerCase()
+  if (message.includes('changed on disk')) return 'CONFLICT'
+  if (message.includes('does not exist')) return 'NOT_FOUND'
+  if (message.includes('approved workspace') || message.includes('outside')) {
+    return 'FORBIDDEN'
+  }
+  if (
+    message.includes('must') ||
+    message.includes('invalid') ||
+    message.includes('cannot')
+  ) {
+    return 'INVALID_ARGUMENT'
+  }
+  return 'INTERNAL'
+}
+
+async function runAutomation(id: string): Promise<{
+  automation: AutomationDefinition
+  task: TaskRecord
+}> {
+  if (runningAutomations.has(id)) {
+    throw new Error('Automation is already running.')
+  }
+  const automation = integrations.getAutomation(id)
+  if (!automation) throw new Error('Automation does not exist.')
+  const project = store.getProject(automation.projectId)
+  if (!project) throw new Error('Automation project does not exist.')
+
+  runningAutomations.add(id)
+  try {
+    const created = await store.createTask({
+      projectId: project.id,
+      title: automation.name,
+      select: false
+    })
+    const task = await store.updateTask(created.id, {
+      automationId: automation.id
+    })
+    const updatedAutomation = await integrations.markAutomationRun(automation.id)
+    emit({ type: 'task.updated', taskId: task.id, payload: task })
+    emit({
+      type: 'automations.updated',
+      payload: integrations.listAutomations()
+    })
+
+    const settings = store.getSettings()
+    void sendPrompt({
+      taskId: task.id,
+      text: automation.prompt,
+      attachments: [],
+      model: settings.defaultModel,
+      effort: settings.defaultEffort,
+      permissionMode: settings.defaultPermissionMode
+    })
+      .catch(async (error: unknown) => {
+        const inbox = await store.addInbox({
+          sourceId: `automation-launch:${automation.id}:${task.id}`,
+          taskId: task.id,
+          type: 'automation',
+          title: `Automation failed to start: ${automation.name}`,
+          body: errorMessage(error)
+        })
+        emit({ type: 'inbox.updated', payload: inbox })
+      })
+      .finally(() => {
+        runningAutomations.delete(id)
+      })
+
+    return { automation: updatedAutomation, task }
+  } catch (error) {
+    runningAutomations.delete(id)
+    throw error
+  }
+}
+
+function startAutomationScheduler(): void {
+  if (automationTimer) return
+  const tick = (): void => {
+    for (const automation of integrations.dueAutomations()) {
+      if (runningAutomations.has(automation.id)) continue
+      void runAutomation(automation.id).catch((error: unknown) => {
+        console.warn(`Unable to run automation ${automation.id}.`, error)
+      })
+    }
+  }
+  automationTimer = setInterval(tick, 30_000)
+  automationTimer.unref()
+  tick()
 }
 
 type PromptInput = {
@@ -588,7 +1103,9 @@ async function sendPrompt(input: PromptInput): Promise<void> {
       executablePath: store.getSettings().grokPath || undefined,
       model: input.model || undefined,
       permissionMode: mapPermissionMode(input.permissionMode),
-      existingSessionId: task.sessionId
+      existingSessionId: task.sessionId,
+      rules: integrations.memoryRules(task.projectId),
+      mcpServers: integrations.enabledMcpServers()
     })
     connectedTasks.add(task.id)
   }
@@ -644,6 +1161,7 @@ async function handleAcpEvent(event: GrokAcpEvent): Promise<void> {
       emit({ type: 'models.updated', payload: availableModels })
       await updateTaskAndEmit(taskId, {
         sessionId: event.payload.sessionId,
+        sessionSource: 'desktop',
         model: event.payload.currentModelId
       })
       return
@@ -657,33 +1175,62 @@ async function handleAcpEvent(event: GrokAcpEvent): Promise<void> {
     case 'tool-updated':
       await upsertToolPart(taskId, event.payload.tool)
       return
-    case 'permission-request':
+    case 'permission-request': {
       await updateTaskAndEmit(taskId, { status: 'waiting' })
+      const permissionPayload = {
+        id: event.payload.requestId,
+        taskId,
+        title: event.payload.summary || event.payload.toolName,
+        description: event.payload.detail,
+        tool: event.payload.toolName,
+        options: event.payload.options.map((option) => ({
+          id: option.optionId,
+          label: option.name || option.kind || option.optionId,
+          kind: permissionOptionKind(option.kind || option.optionId),
+          dangerous: /deny|reject/i.test(option.kind || option.optionId)
+        })),
+        createdAt: new Date(event.timestamp).toISOString()
+      }
       emit({
         type: 'permission.request',
         taskId,
-        payload: {
-          id: event.payload.requestId,
+        payload: permissionPayload
+      })
+      emit({
+        type: 'inbox.updated',
+        payload: await store.addInbox({
+          sourceId: event.payload.requestId,
           taskId,
-          title: event.payload.summary || event.payload.toolName,
-          description: event.payload.detail,
-          tool: event.payload.toolName,
-          options: event.payload.options.map((option) => ({
-            id: option.optionId,
-            label: option.name || option.kind || option.optionId,
-            kind: permissionOptionKind(option.kind || option.optionId),
-            dangerous: /deny|reject/i.test(option.kind || option.optionId)
-          })),
-          createdAt: new Date(event.timestamp).toISOString()
-        }
+          sessionId: event.payload.sessionId,
+          type: 'permission',
+          title: permissionPayload.title,
+          body: permissionPayload.description,
+          createdAt: permissionPayload.createdAt
+        })
       })
       notifyWhenBackground(
         'Grok needs approval',
         event.payload.summary || event.payload.toolName
       )
       return
+    }
     case 'completed':
       await finishAssistant(taskId, 'completed')
+      if (store.getTask(taskId)?.automationId) {
+        const automation = integrations.getAutomation(
+          store.getTask(taskId)!.automationId!
+        )
+        const inbox = await store.addInbox({
+          sourceId: `automation-result:${taskId}`,
+          taskId,
+          sessionId: store.getTask(taskId)?.sessionId,
+          type: 'automation',
+          title: `Automation completed: ${automation?.name ?? store.getTask(taskId)?.title ?? 'Task'}`,
+          body: 'Open the task to review the result.',
+          createdAt: new Date(event.timestamp).toISOString()
+        })
+        emit({ type: 'inbox.updated', payload: inbox })
+      }
       notifyWhenBackground(
         'Grok task completed',
         store.getTask(taskId)?.title ?? 'Your task is ready.'
@@ -698,6 +1245,18 @@ async function handleAcpEvent(event: GrokAcpEvent): Promise<void> {
         status: 'error',
         error: event.payload.message
       })
+      emit({
+        type: 'inbox.updated',
+        payload: await store.addInbox({
+          sourceId: `error:${taskId}:${event.timestamp}`,
+          taskId,
+          sessionId: store.getTask(taskId)?.sessionId,
+          type: 'error',
+          title: store.getTask(taskId)?.title ?? 'Grok task failed',
+          body: event.payload.message,
+          createdAt: new Date(event.timestamp).toISOString()
+        })
+      })
       emitError(taskId, event.payload.message)
       return
     case 'stderr':
@@ -711,6 +1270,62 @@ async function handleAcpEvent(event: GrokAcpEvent): Promise<void> {
         contextTokens: event.payload.usedTokens
       })
       return
+    case 'goal-updated':
+      await updateTaskAndEmit(taskId, { goal: event.payload })
+      return
+    case 'subagent-updated': {
+      const task = store.getTask(taskId)
+      if (!task) return
+      const current = task.subagents ?? []
+      const existing = current.find((entry) => entry.id === event.payload.id)
+      const next = existing
+        ? current.map((entry) =>
+            entry.id === event.payload.id ? { ...entry, ...event.payload } : entry
+          )
+        : [...current, event.payload]
+      await updateTaskAndEmit(taskId, { subagents: next })
+      return
+    }
+    case 'background-task-updated': {
+      const task = store.getTask(taskId)
+      if (!task) return
+      const current = task.backgroundTasks ?? []
+      const existing = current.find((entry) => entry.id === event.payload.id)
+      const merged = existing ? { ...existing, ...event.payload } : event.payload
+      const next = existing
+        ? current.map((entry) => (entry.id === event.payload.id ? merged : entry))
+        : [...current, merged]
+      await updateTaskAndEmit(taskId, { backgroundTasks: next })
+
+      if (
+        !event.payload.staleOnLoad &&
+        (event.payload.phase === 'monitor' || event.payload.phase === 'completed')
+      ) {
+        const isMonitor = event.payload.phase === 'monitor' || merged.isMonitor
+        const body =
+          event.payload.eventText ??
+          event.payload.output ??
+          event.payload.description ??
+          event.payload.command
+        const inbox = await store.addInbox({
+          sourceId: `${isMonitor ? 'monitor' : 'background'}:${taskId}:${event.payload.id}`,
+          taskId,
+          sessionId: task.sessionId,
+          type: isMonitor ? 'monitor' : 'background_task',
+          title: isMonitor
+            ? event.payload.description ?? 'Monitor update'
+            : `${event.payload.success === false ? 'Failed' : 'Completed'}: ${event.payload.command ?? event.payload.id}`,
+          body,
+          createdAt: event.payload.updatedAt
+        })
+        emit({ type: 'inbox.updated', payload: inbox })
+        notifyWhenBackground(
+          isMonitor ? 'Monitor update' : 'Background task completed',
+          body ?? event.payload.id
+        )
+      }
+      return
+    }
     case 'notification':
       return
   }
@@ -912,9 +1527,13 @@ function expectString(
   return value
 }
 
-function optionalString(value: unknown, field: string): string | undefined {
+function optionalString(
+  value: unknown,
+  field: string,
+  allowEmpty = false
+): string | undefined {
   if (value === undefined || value === null) return undefined
-  return expectString(value, field)
+  return expectString(value, field, allowEmpty)
 }
 
 function expectIdentifier(value: unknown, field: string): string {
@@ -969,8 +1588,14 @@ function emitError(taskId: string | undefined, error: unknown): void {
 }
 
 async function start(): Promise<void> {
-  store = new DesktopStore(join(app.getPath('userData'), 'desktop-state.json'))
+  const userDataPath = app.getPath('userData')
+  store = new DesktopStore(join(userDataPath, 'desktop-state.json'))
   await store.load()
+  integrations = new IntegrationStore(join(userDataPath, 'integrations.json'))
+  await integrations.load()
+  sessionIndex = new SessionIndexService({
+    metadataPath: join(userDataPath, 'session-meta.json')
+  })
   nativeTheme.themeSource = store.getSettings().theme
 
   installApplicationMenu()
@@ -981,6 +1606,7 @@ async function start(): Promise<void> {
   )
 
   await createWindow()
+  startAutomationScheduler()
 }
 
 const ownsSingleInstance = app.requestSingleInstanceLock()
@@ -1008,5 +1634,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  if (automationTimer) clearInterval(automationTimer)
+  automationTimer = undefined
   void shutdownManager()
 })
