@@ -8,10 +8,13 @@ identity, and network boundaries independent.
 ## What is included
 
 - macOS, Windows, and Linux Electron targets
-- local projects and persisted task conversations
+- indexed Grok session history with search, resume, rename, archive, and export
 - one long-lived `grok agent stdio` ACP connection per active task
-- streamed replies, thoughts, plans, tool activity, and permission requests
-- model, reasoning-effort, approval-mode, attachment, and runtime settings
+- streamed replies, thoughts, plans, goals, subagents, background work, and approvals
+- `@` file references, slash commands, Skills, attachments, and pasted images
+- workspace files, conflict-aware editing, Git changes, and unified diffs
+- Inbox, MCP servers, workspace memory, and recurring automations
+- model, reasoning-effort, approval-mode, appearance, and runtime settings
 
 The app invokes a separately installed Grok CLI. It does not bundle the CLI or
 depend on 21st.dev hosted services.
@@ -42,6 +45,6 @@ pnpm --filter @nolirabuild/desktop dev
 | `pnpm --filter @nolirabuild/desktop dist:win` | Package Windows builds |
 | `pnpm --filter @nolirabuild/desktop dist:linux` | Package Linux builds |
 
-See [apps/desktop/README.md](apps/desktop/README.md) for runtime discovery,
-security boundaries, and packaging notes. Third-party attribution is recorded
-in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+See [apps/desktop/README.md](apps/desktop/README.md) for the capability map,
+runtime discovery, security boundaries, and packaging notes. Third-party
+attribution is recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

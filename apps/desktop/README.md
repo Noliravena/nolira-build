@@ -2,6 +2,16 @@
 
 Electron 39 + React 19 desktop workspace for Grok ACP. The product shell follows the dense project/task/chat hierarchy of 1Code while using original Nolira Build branding and a provider boundary built around `grok agent stdio`.
 
+## Implemented capabilities
+
+- **Sessions:** indexes real Grok `summary.json` and `chat_history.jsonl` files for approved repositories; supports search, continue recent, on-demand history hydration, local rename/archive metadata, and Markdown export.
+- **Composer:** supports `@` workspace files, `/` commands, discovered Skills, native attachments, clipboard images, model/effort/permission controls, and cancel.
+- **Workspace:** browses and edits files through a validated main-process API, detects save conflicts by mtime, shows Git changes and unified diffs, and opens paths in the system editor.
+- **Agent activity:** normalizes streamed messages, reasoning, tools, permissions, plan exit approvals, goals, subagents, background jobs, and monitor wakeups before they reach React.
+- **Integrations:** exposes Grok runtime/provider status, Skills discovery, MCP configuration, per-project memory, recurring automations, and a persistent Inbox.
+
+The account and credential boundary intentionally remains with the Grok CLI. Nolira Build does not duplicate an OAuth session or store a second plaintext API key in renderer-managed settings.
+
 ## Local development
 
 From the repository root:
@@ -13,12 +23,16 @@ pnpm --filter @nolirabuild/desktop dev
 
 By default the application resolves `grok` from the user's configured path, `~/.grok/bin`, or `PATH`. Project and task metadata are stored as JSON below Electron's per-user `userData` directory; credentials and Grok's own session data remain owned by the Grok CLI.
 
+The session index reads `${GROK_HOME:-~/.grok}/sessions` but only admits sessions whose resolved working directory is one of the repositories the user has added to Nolira Build. Disk-owned Grok messages are hydrated when a session opens and are not copied into the desktop state file.
+
 For isolated UI or integration checks, set `NOLIRA_USER_DATA_DIR` to an empty
 temporary directory before starting the development app.
 
 ## Security boundary
 
 The renderer has `contextIsolation` enabled, Node integration disabled, and a sandboxed preload. It can access native capabilities only through the allow-listed `window.nolira` bridge. Navigation, new-window requests, external URL opening, filesystem dialogs, and ACP process control are validated in the main process.
+
+Workspace file APIs resolve symlinks and reject paths outside an approved repository. Writes carry the last observed modification time and fail on concurrent changes instead of silently overwriting them. Persistent integration files are written atomically with owner-only permissions.
 
 ## Packaging
 
