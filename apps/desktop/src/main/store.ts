@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path'
 
+import type { SessionSummary } from '../shared/host-api'
+
 export type TaskStatus =
   | 'idle'
   | 'starting'
@@ -71,14 +73,78 @@ export interface TaskRecord {
   status: TaskStatus
   messages: MessageRecord[]
   sessionId?: string
+  sessionSource?: 'desktop' | 'grok'
+  sessionDirectory?: string
+  parentSessionId?: string
+  sessionKind?: string
+  automationId?: string
+  archived?: boolean
+  pinned?: boolean
   model?: string
   effort?: EffortLevel
   permissionMode?: PermissionMode
   plan?: string[]
   contextTokens?: number
+  goal?: {
+    id?: string
+    objective: string
+    status: 'active' | 'paused' | 'completed' | 'cancelled' | 'error'
+    phase?: string
+    elapsedMs?: number
+    lastEvent?: string
+    message?: string
+    updatedAt: string
+  }
+  subagents?: Array<{
+    id: string
+    parentSessionId?: string
+    childSessionId?: string
+    type?: string
+    description?: string
+    phase: 'spawned' | 'progress' | 'finished'
+    status: string
+    durationMs?: number
+    turnCount?: number
+    toolCallCount?: number
+    tokensUsed?: number
+    error?: string
+    output?: string
+    updatedAt: string
+  }>
+  backgroundTasks?: Array<{
+    id: string
+    phase: 'backgrounded' | 'completed' | 'monitor'
+    command?: string
+    description?: string
+    cwd?: string
+    outputFile?: string
+    toolCallId?: string
+    isMonitor?: boolean
+    exitCode?: number | null
+    signal?: string
+    success?: boolean
+    willWake?: boolean
+    durationMs?: number
+    output?: string
+    eventText?: string
+    staleOnLoad?: boolean
+    updatedAt: string
+  }>
   error?: string
   createdAt: string
   updatedAt: string
+}
+
+export interface InboxRecord {
+  id: string
+  sourceId?: string
+  taskId?: string
+  sessionId?: string
+  type: 'permission' | 'background_task' | 'monitor' | 'error' | 'automation'
+  title: string
+  body?: string
+  read: boolean
+  createdAt: string
 }
 
 export interface AppSettingsRecord {
@@ -96,6 +162,7 @@ interface PersistedState {
   projects: ProjectRecord[]
   tasks: TaskRecord[]
   settings: AppSettingsRecord
+  inbox: InboxRecord[]
   selectedTaskId?: string
 }
 
@@ -113,6 +180,7 @@ const EMPTY_STATE: PersistedState = {
   version: 1,
   projects: [],
   tasks: [],
+  inbox: [],
   settings: DEFAULT_SETTINGS
 }
 
@@ -147,13 +215,24 @@ export class DesktopStore {
         projects: Array.isArray(decoded.projects)
           ? (decoded.projects as ProjectRecord[])
           : [],
-        tasks: Array.isArray(decoded.tasks) ? (decoded.tasks as TaskRecord[]) : [],
+        tasks: Array.isArray(decoded.tasks)
+          ? (decoded.tasks as TaskRecord[]).map((task) => ({
+              ...task,
+              messages:
+                task.sessionSource === 'grok' || !Array.isArray(task.messages)
+                  ? []
+                  : task.messages
+            }))
+          : [],
         settings: {
           ...DEFAULT_SETTINGS,
           ...(isRecord(decoded.settings)
             ? (decoded.settings as Partial<AppSettingsRecord>)
             : {})
         },
+        inbox: Array.isArray(decoded.inbox)
+          ? (decoded.inbox as InboxRecord[])
+          : [],
         selectedTaskId:
           typeof decoded.selectedTaskId === 'string'
             ? decoded.selectedTaskId
@@ -174,6 +253,7 @@ export class DesktopStore {
       projects: clone(this.state.projects),
       tasks: clone(this.state.tasks),
       settings: clone(this.state.settings),
+      inbox: clone(this.state.inbox),
       activeTaskId: this.state.selectedTaskId
     }
   }
@@ -198,6 +278,66 @@ export class DesktopStore {
   getTask(taskId: string): TaskRecord | undefined {
     const task = this.state.tasks.find((entry) => entry.id === taskId)
     return task ? clone(task) : undefined
+  }
+
+  findTaskBySessionId(sessionId: string): TaskRecord | undefined {
+    const task = this.state.tasks.find((entry) => entry.sessionId === sessionId)
+    return task ? clone(task) : undefined
+  }
+
+  async syncIndexedSessions(sessions: SessionSummary[]): Promise<TaskRecord[]> {
+    const indexed: TaskRecord[] = []
+
+    for (const session of sessions) {
+      const existing = this.state.tasks.find(
+        (entry) => entry.sessionId === session.sessionId
+      )
+      if (existing) {
+        if (existing.sessionSource === 'grok') existing.title = session.title
+        existing.sessionSource ??= 'desktop'
+        existing.model = session.model ?? existing.model
+        existing.archived = session.archived
+        existing.pinned = session.pinned
+        existing.updatedAt = session.updatedAt
+        indexed.push(existing)
+        continue
+      }
+
+      const task: TaskRecord = {
+        id: randomUUID(),
+        projectId: session.projectId,
+        title: session.title,
+        status: 'idle',
+        messages: [],
+        sessionId: session.sessionId,
+        sessionSource: 'grok',
+        archived: session.archived,
+        pinned: session.pinned,
+        model: session.model ?? this.state.settings.defaultModel,
+        effort: this.state.settings.defaultEffort,
+        permissionMode: this.state.settings.defaultPermissionMode,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt
+      }
+      this.state.tasks.push(task)
+      indexed.push(task)
+    }
+
+    this.state.tasks.sort((left, right) => {
+      if (Boolean(left.pinned) !== Boolean(right.pinned)) return left.pinned ? -1 : 1
+      return Date.parse(right.updatedAt) - Date.parse(left.updatedAt)
+    })
+    await this.persist()
+    return clone(indexed)
+  }
+
+  async replaceMessages(
+    taskId: string,
+    messages: MessageRecord[]
+  ): Promise<TaskRecord> {
+    const task = this.requireTask(taskId)
+    task.messages = clone(messages)
+    return clone(task)
   }
 
   async createProject(input: { path: string; name?: string }): Promise<ProjectRecord> {
@@ -226,6 +366,7 @@ export class DesktopStore {
   async createTask(input: {
     projectId: string
     title?: string
+    select?: boolean
   }): Promise<TaskRecord> {
     if (!this.state.projects.some((project) => project.id === input.projectId)) {
       throw new Error('Project does not exist.')
@@ -246,7 +387,7 @@ export class DesktopStore {
     }
 
     this.state.tasks.unshift(task)
-    this.state.selectedTaskId = task.id
+    if (input.select !== false) this.state.selectedTaskId = task.id
     await this.persist()
     return clone(task)
   }
@@ -294,6 +435,63 @@ export class DesktopStore {
     return clone(this.state.settings)
   }
 
+  listInbox(): InboxRecord[] {
+    return clone(this.state.inbox)
+  }
+
+  async addInbox(
+    input: Omit<InboxRecord, 'id' | 'read' | 'createdAt'> & {
+      createdAt?: string
+    }
+  ): Promise<InboxRecord[]> {
+    const existing = input.sourceId
+      ? this.state.inbox.find((item) => item.sourceId === input.sourceId)
+      : undefined
+    if (existing) {
+      Object.assign(existing, input, { read: false })
+    } else {
+      this.state.inbox.unshift({
+        ...input,
+        id: randomUUID(),
+        read: false,
+        createdAt: input.createdAt ?? new Date().toISOString()
+      })
+      this.state.inbox = this.state.inbox.slice(0, 500)
+    }
+    await this.persist()
+    return this.listInbox()
+  }
+
+  async markInboxRead(id: string, read = true): Promise<InboxRecord[]> {
+    const item = this.state.inbox.find((entry) => entry.id === id)
+    if (!item) throw new Error('Inbox item does not exist.')
+    item.read = read
+    await this.persist()
+    return this.listInbox()
+  }
+
+  async markAllInboxRead(): Promise<InboxRecord[]> {
+    for (const item of this.state.inbox) item.read = true
+    await this.persist()
+    return this.listInbox()
+  }
+
+  async dismissInbox(id: string): Promise<InboxRecord[]> {
+    const index = this.state.inbox.findIndex((entry) => entry.id === id)
+    if (index < 0) throw new Error('Inbox item does not exist.')
+    this.state.inbox.splice(index, 1)
+    await this.persist()
+    return this.listInbox()
+  }
+
+  async dismissInboxBySource(sourceId: string): Promise<InboxRecord[]> {
+    const next = this.state.inbox.filter((entry) => entry.sourceId !== sourceId)
+    if (next.length === this.state.inbox.length) return this.listInbox()
+    this.state.inbox = next
+    await this.persist()
+    return this.listInbox()
+  }
+
   async updateSettings(
     patch: Partial<AppSettingsRecord>
   ): Promise<AppSettingsRecord> {
@@ -320,7 +518,13 @@ export class DesktopStore {
   }
 
   private async persist(): Promise<void> {
-    const payload = JSON.stringify(this.state, null, 2)
+    const persistedState: PersistedState = {
+      ...this.state,
+      tasks: this.state.tasks.map((task) =>
+        task.sessionSource === 'grok' ? { ...task, messages: [] } : task
+      )
+    }
+    const payload = JSON.stringify(persistedState, null, 2)
     const temporaryPath = `${this.filePath}.next`
 
     this.writeQueue = this.writeQueue.catch(() => undefined).then(async () => {
