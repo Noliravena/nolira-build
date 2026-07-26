@@ -16,6 +16,7 @@ export type MessageRole = 'user' | 'assistant' | 'system'
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max'
 export type PermissionMode = 'default' | 'accept-edits' | 'full-access'
 export type ThemeMode = 'system' | 'light' | 'dark'
+export type AccentColor = 'ember' | 'blue' | 'violet' | 'mint'
 
 export interface ProjectRecord {
   id: string
@@ -153,6 +154,7 @@ export interface AppSettingsRecord {
   defaultEffort: EffortLevel
   defaultPermissionMode: PermissionMode
   theme: ThemeMode
+  accent: AccentColor
   showActivityPanel: boolean
   notifications: boolean
 }
@@ -172,6 +174,7 @@ const DEFAULT_SETTINGS: AppSettingsRecord = {
   defaultEffort: 'high',
   defaultPermissionMode: 'default',
   theme: 'dark',
+  accent: 'ember',
   showActivityPanel: false,
   notifications: true
 }

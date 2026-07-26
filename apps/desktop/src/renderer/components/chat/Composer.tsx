@@ -8,6 +8,7 @@ import {
 } from "react"
 
 import { Icon } from "../../icons"
+import { contextPercent } from "../../lib/agentPresentation"
 import {
   COMPOSER_COMMANDS,
   composerTriggerAt,
@@ -27,7 +28,7 @@ import type {
   Task,
   WorkspaceFile,
 } from "../../types"
-import { SelectControl } from "../chrome/SelectControl"
+import { Menu } from "../nolira/Menu"
 
 export interface ComposerProps {
   task: Task | null
@@ -43,6 +44,10 @@ export interface ComposerProps {
   setPreviewMessages?: React.Dispatch<
     React.SetStateAction<import("../../types").ChatMessage[]>
   >
+  /** Pre-fill the draft (used by the empty-state starters). */
+  initialText?: string
+  /** Visual density: the home composer is roomier than the session one. */
+  variant?: "home" | "session"
 }
 
 export function Composer({
@@ -57,6 +62,8 @@ export function Composer({
   onBusyChange,
   apiAvailable,
   setPreviewMessages,
+  initialText,
+  variant = "session",
 }: ComposerProps) {
   const [text, setText] = useState("")
   const [attachments, setAttachments] = useState<Attachment[]>([])
@@ -125,6 +132,16 @@ export function Composer({
   useEffect(() => {
     onBusyChange?.(sending)
   }, [onBusyChange, sending])
+
+  useEffect(() => {
+    if (!initialText) return
+    setText(initialText)
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus()
+      const length = initialText.length
+      textareaRef.current?.setSelectionRange(length, length)
+    })
+  }, [initialText])
 
   useEffect(() => {
     setModel(task?.model ?? settings.defaultModel)
@@ -376,9 +393,14 @@ export function Composer({
   const uniqueModels = Array.from(
     new Set([model, settings.defaultModel, ...models].filter(Boolean)),
   )
+  const contextUsed = contextPercent(task?.contextTokens)
+  const ringOffset =
+    contextUsed === null ? 56.5 : 56.5 - (56.5 * contextUsed) / 100
 
   return (
-    <div className={`composer ${busy ? "is-busy" : ""} ${className}`.trim()}>
+    <div
+      className={`nol-composer ${variant === "session" ? "nol-composer-session" : ""} ${className}`.trim()}
+    >
       {attachments.length > 0 && (
         <div className="attachment-list">
           {attachments.map((attachment, index) => (
@@ -474,74 +496,104 @@ export function Composer({
         onSelect={(event) =>
           setCursorPosition(event.currentTarget.selectionStart)
         }
-        placeholder="Message agent…  @ files  / commands"
-        rows={1}
+        placeholder="Plan, build, / for commands, @ for files"
+        rows={variant === "home" ? 2 : 1}
         value={text}
       />
-      <div className="composer-toolbar">
-        <div className="composer-tools">
-          <SelectControl
-            ariaLabel="Permission mode"
-            className="composer-mode"
-            compact
-            onChange={(value) => setPermissionMode(value as PermissionMode)}
-            options={[
-              { value: "default", label: "Agent" },
-              { value: "accept-edits", label: "Auto edit" },
-              { value: "full-access", label: "Full access" },
-            ]}
-            value={permissionMode}
-          />
-          <SelectControl
-            ariaLabel="Model"
-            className="composer-model"
-            compact
-            onChange={setModel}
-            options={uniqueModels.map((value) => ({ value, label: value }))}
-            value={model}
-          />
-          <SelectControl
-            ariaLabel="Reasoning effort"
-            className="composer-effort"
-            compact
-            onChange={(value) => setEffort(value as EffortLevel)}
-            options={[
-              { value: "low", label: "Low" },
-              { value: "medium", label: "Medium" },
-              { value: "high", label: "High" },
-              { value: "max", label: "Max" },
-            ]}
-            value={effort}
-          />
-        </div>
-        <div className="composer-actions">
+      <div className="nol-composer-row">
+        <Menu
+          ariaLabel="Permission mode"
+          drop="up"
+          icon="infinity"
+          onSelect={(value) => setPermissionMode(value as PermissionMode)}
+          options={[
+            { value: "default", label: "Agent", hint: "ask first" },
+            { value: "accept-edits", label: "Auto edit", hint: "edits land" },
+            { value: "full-access", label: "Full access", hint: "no prompts" },
+          ]}
+          value={permissionMode}
+          variant="pill"
+        />
+        <Menu
+          ariaLabel="Model"
+          drop="up"
+          mono
+          minWidth={230}
+          onSelect={setModel}
+          options={uniqueModels.map((value) => ({ value, label: value }))}
+          value={model}
+          variant="mono"
+        />
+        <Menu
+          ariaLabel="Reasoning effort"
+          drop="up"
+          minWidth={180}
+          onSelect={(value) => setEffort(value as EffortLevel)}
+          options={[
+            { value: "low", label: "Low" },
+            { value: "medium", label: "Medium" },
+            { value: "high", label: "High" },
+            { value: "max", label: "Max" },
+          ]}
+          value={effort}
+          variant="mono"
+        />
+        <div className="nol-flex1" />
+        {contextUsed !== null && (
+          <div className="nol-ring" title="Context used">
+            <svg width="19" height="19" viewBox="0 0 24 24">
+              <circle
+                cx="12"
+                cy="12"
+                r="9"
+                fill="none"
+                stroke="var(--bd)"
+                strokeWidth="2.6"
+              />
+              <circle
+                cx="12"
+                cy="12"
+                r="9"
+                fill="none"
+                stroke="var(--mu)"
+                strokeWidth="2.6"
+                strokeLinecap="round"
+                strokeDasharray="56.5"
+                strokeDashoffset={ringOffset}
+              />
+            </svg>
+            <span>{contextUsed}%</span>
+          </div>
+        )}
+        <button
+          className="nol-round-icon"
+          onClick={addAttachments}
+          aria-label="Attach files"
+          title="Attach files"
+          type="button"
+        >
+          <Icon name="attachment" size={17} />
+        </button>
+        {busy ? (
           <button
-            className="composer-icon-button"
-            onClick={addAttachments}
-            aria-label="Attach files"
-            title="Attach files"
+            className="nol-send nol-stop"
+            aria-label="Stop agent"
+            onClick={cancel}
+            type="button"
           >
-            <Icon name="attachment" size={16} />
+            <Icon name="stop" size={16} />
           </button>
-          {busy ? (
-            <button
-              className="send-button stop-button"
-              aria-label="Stop agent"
-              onClick={cancel}
-            >
-              <Icon name="stop" size={16} />
-            </button>
-          ) : (
-            <button
-              className="send-button"
-              aria-label="Send prompt"
-              disabled={!text.trim() && attachments.length === 0}
-              onClick={send}
-            >
-              <Icon name="arrow-up" size={16} />
-            </button>
-          )}
-        </div>
+        ) : (
+          <button
+            className="nol-send"
+            aria-label="Send prompt"
+            disabled={!text.trim() && attachments.length === 0}
+            onClick={send}
+            type="button"
+          >
+            <Icon name="arrow-up" size={17} />
+          </button>
+        )}
       </div>
     </div>
   )

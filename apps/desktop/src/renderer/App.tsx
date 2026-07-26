@@ -1,18 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 
+import { PermissionDialog } from "./components/screens/PermissionDialog"
+import { AppHeader, StatusFooter } from "./components/nolira/AppChrome"
 import {
-  ActivityPanel,
-  BrandMark,
-  ChatWorkspace,
-  InboxView,
-  PermissionDialog,
-  SettingsView,
-  Sidebar,
-  WindowChrome,
-  WorkspaceHeader,
-} from "./components/agents"
+  CommandPalette,
+  InboxDialog,
+  type PaletteCommand,
+} from "./components/nolira/dialogs"
+import { HomeView, type HomeViewMode } from "./components/nolira/HomeView"
+import { SessionView } from "./components/nolira/SessionView"
+import { SettingsDialog } from "./components/nolira/SettingsDialog"
 import { demoSnapshot } from "./lib/demoSnapshot"
 import { pathName } from "./lib/format"
+import { cardStatus } from "./lib/agentPresentation"
 import { isMac } from "./lib/platform"
 import {
   applyMessageDelta,
@@ -30,7 +30,7 @@ import type {
   Task,
 } from "./types"
 
-type Screen = "workspace" | "settings" | "inbox"
+type Screen = "home" | "session"
 
 export function App() {
   const api = window.nolira
@@ -41,9 +41,7 @@ export function App() {
     api ? [] : demoSnapshot.projects,
   )
   const [tasks, setTasks] = useState<Task[]>(api ? [] : demoSnapshot.tasks)
-  const [settings, setSettings] = useState<AppSettings>(
-    demoSnapshot.settings,
-  )
+  const [settings, setSettings] = useState<AppSettings>(demoSnapshot.settings)
   const [runtime, setRuntime] = useState<RuntimeStatus>(
     api ? { state: "checking" } : demoSnapshot.runtime,
   )
@@ -51,17 +49,17 @@ export function App() {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(
     api ? null : (demoSnapshot.activeTaskId ?? null),
   )
-  const taskHistoryRef = useRef<string[]>([])
-  const taskHistoryIndexRef = useRef(-1)
-  const [taskHistoryState, setTaskHistoryState] = useState({
-    canGoBack: false,
-    canGoForward: false,
-  })
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
   const [inbox, setInbox] = useState<InboxItem[]>([])
-  const [screen, setScreen] = useState<Screen>("workspace")
-  const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [activityOpen, setActivityOpen] = useState(false)
+  const [screen, setScreen] = useState<Screen>("home")
+  const [view, setView] = useState<HomeViewMode>("grid")
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
+    null,
+  )
+  const [paneOpen, setPaneOpen] = useState(true)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [inboxOpen, setInboxOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   const [loading, setLoading] = useState(Boolean(api))
   const [toast, setToast] = useState<string | null>(null)
 
@@ -72,46 +70,23 @@ export function App() {
   const activeProject = useMemo(
     () =>
       projects.find((project) => project.id === activeTask?.projectId) ??
+      projects.find((project) => project.id === selectedProjectId) ??
       projects[0] ??
       null,
-    [activeTask?.projectId, projects],
+    [activeTask?.projectId, projects, selectedProjectId],
+  )
+  const homeProject = useMemo(
+    () =>
+      projects.find((project) => project.id === selectedProjectId) ??
+      projects[0] ??
+      null,
+    [projects, selectedProjectId],
   )
 
   const showToast = useCallback((message: string) => {
     setToast(message)
     window.setTimeout(() => setToast(null), 3200)
   }, [])
-
-  const syncTaskHistoryState = useCallback(() => {
-    const index = taskHistoryIndexRef.current
-    const history = taskHistoryRef.current
-    setTaskHistoryState({
-      canGoBack: index > 0,
-      canGoForward: index >= 0 && index < history.length - 1,
-    })
-  }, [])
-
-  const recordTaskNavigation = useCallback(
-    (taskId: string) => {
-      const currentIndex = taskHistoryIndexRef.current
-      const currentHistory = taskHistoryRef.current
-      if (currentHistory[currentIndex] === taskId) return
-
-      const nextHistory = currentHistory.slice(0, currentIndex + 1)
-      nextHistory.push(taskId)
-      taskHistoryRef.current = nextHistory.slice(-40)
-      taskHistoryIndexRef.current = taskHistoryRef.current.length - 1
-      syncTaskHistoryState()
-    },
-    [syncTaskHistoryState],
-  )
-
-  useEffect(() => {
-    if (!activeTaskId || taskHistoryRef.current.length > 0) return
-    taskHistoryRef.current = [activeTaskId]
-    taskHistoryIndexRef.current = 0
-    syncTaskHistoryState()
-  }, [activeTaskId, syncTaskHistoryState])
 
   const handleEvent = useCallback(
     (event: AgentEvent) => {
@@ -120,7 +95,7 @@ export function App() {
           setProjects(event.payload.projects)
           setTasks(event.payload.tasks)
           setSettings(event.payload.settings)
-          setActivityOpen(event.payload.settings.showActivityPanel)
+          setPaneOpen(event.payload.settings.showActivityPanel)
           setRuntime(event.payload.runtime)
           setModels(event.payload.models ?? [])
           setInbox(event.payload.inbox ?? [])
@@ -154,8 +129,8 @@ export function App() {
           break
         case "permission.request":
           setPermission(event.payload)
-          recordTaskNavigation(event.taskId)
           setActiveTaskId(event.taskId)
+          setScreen("session")
           break
         case "permission.resolved":
           setPermission((current) =>
@@ -178,7 +153,7 @@ export function App() {
           break
       }
     },
-    [recordTaskNavigation, showToast],
+    [showToast],
   )
 
   useEffect(() => {
@@ -196,13 +171,11 @@ export function App() {
         setProjects(snapshot.projects)
         setTasks(snapshot.tasks)
         setSettings(snapshot.settings)
-        setActivityOpen(snapshot.settings.showActivityPanel)
+        setPaneOpen(snapshot.settings.showActivityPanel)
         setRuntime(snapshot.runtime)
         setModels(snapshot.models ?? [])
         setInbox(snapshot.inbox ?? [])
-        setActiveTaskId(
-          snapshot.activeTaskId ?? snapshot.tasks[0]?.id ?? null,
-        )
+        setActiveTaskId(snapshot.activeTaskId ?? snapshot.tasks[0]?.id ?? null)
       })
       .catch((error: unknown) => {
         if (!alive) return
@@ -219,51 +192,44 @@ export function App() {
     }
   }, [api, handleEvent])
 
+  // Resolved theme (system → media query) applied via data attributes.
+  const [systemDark, setSystemDark] = useState(
+    () => window.matchMedia("(prefers-color-scheme: dark)").matches,
+  )
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)")
+    const onChange = () => setSystemDark(media.matches)
+    media.addEventListener("change", onChange)
+    return () => media.removeEventListener("change", onChange)
+  }, [])
+  const resolvedTheme: "dark" | "light" =
+    settings.theme === "dark" || (settings.theme === "system" && systemDark)
+      ? "dark"
+      : "light"
   useEffect(() => {
     const root = document.documentElement
-    const systemDark = window.matchMedia("(prefers-color-scheme: dark)")
-
-    const applyTheme = () => {
-      const dark =
-        settings.theme === "dark" ||
-        (settings.theme === "system" && systemDark.matches)
-      root.dataset.theme = dark ? "dark" : "light"
-    }
-
-    applyTheme()
-    systemDark.addEventListener("change", applyTheme)
-    return () => systemDark.removeEventListener("change", applyTheme)
-  }, [settings.theme])
+    root.dataset.theme = resolvedTheme
+    root.dataset.accent = settings.accent ?? "ember"
+  }, [resolvedTheme, settings.accent])
 
   const selectTask = useCallback(
-    async (taskId: string, recordHistory = true) => {
-      if (recordHistory) recordTaskNavigation(taskId)
+    async (taskId: string) => {
       setActiveTaskId(taskId)
-      setScreen("workspace")
-      if (window.innerWidth <= 780) setSidebarOpen(false)
+      setScreen("session")
       if (!api) return
       try {
         const task = await api.selectTask(taskId)
         if (task) setTasks((current) => upsertTask(current, task))
       } catch (error) {
-        showToast(error instanceof Error ? error.message : "Could not load task")
+        showToast(
+          error instanceof Error ? error.message : "Could not load task",
+        )
       }
     },
-    [api, recordTaskNavigation, showToast],
+    [api, showToast],
   )
 
-  const navigateTaskHistory = useCallback(
-    (offset: -1 | 1) => {
-      const nextIndex = taskHistoryIndexRef.current + offset
-      const taskId = taskHistoryRef.current[nextIndex]
-      if (!taskId) return
-
-      taskHistoryIndexRef.current = nextIndex
-      syncTaskHistoryState()
-      void selectTask(taskId, false)
-    },
-    [selectTask, syncTaskHistoryState],
-  )
+  const goHome = useCallback(() => setScreen("home"), [])
 
   const addProject = useCallback(async () => {
     if (!api) {
@@ -275,22 +241,19 @@ export function App() {
       if (!path) return
       const project = await api.createProject({ path, name: pathName(path) })
       setProjects((current) => upsertProject(current, project))
-      const task = await api.createTask({
-        projectId: project.id,
-        title: "New task",
-      })
-      setTasks((current) => upsertTask(current, task))
-      await selectTask(task.id)
+      setSelectedProjectId(project.id)
+      showToast(`Added ${project.name}`)
     } catch (error) {
       showToast(
         error instanceof Error ? error.message : "Could not add workspace",
       )
     }
-  }, [api, selectTask, showToast])
+  }, [api, showToast])
 
   const createTask = useCallback(
-    async (projectId = activeProject?.id) => {
-      if (!projectId) {
+    async (projectId?: string) => {
+      const targetProjectId = projectId ?? homeProject?.id
+      if (!targetProjectId) {
         await addProject()
         return null
       }
@@ -299,7 +262,7 @@ export function App() {
         const date = new Date().toISOString()
         const task: Task = {
           id: `preview-${Date.now()}`,
-          projectId,
+          projectId: targetProjectId,
           title: "New task",
           status: "idle",
           messages: [],
@@ -315,16 +278,21 @@ export function App() {
       }
 
       try {
-        const task = await api.createTask({ projectId, title: "New task" })
+        const task = await api.createTask({
+          projectId: targetProjectId,
+          title: "New task",
+        })
         setTasks((current) => upsertTask(current, task))
         await selectTask(task.id)
         return task
       } catch (error) {
-        showToast(error instanceof Error ? error.message : "Could not create task")
+        showToast(
+          error instanceof Error ? error.message : "Could not create task",
+        )
         return null
       }
     },
-    [activeProject?.id, addProject, api, selectTask, settings, showToast],
+    [addProject, api, homeProject?.id, selectTask, settings, showToast],
   )
 
   const refreshSessions = useCallback(async () => {
@@ -334,9 +302,7 @@ export function App() {
         includeArchived: true,
       })
       if (!response.ok) throw new Error(response.error.message)
-      setTasks((current) =>
-        response.data.tasks.reduce(upsertTask, current),
-      )
+      setTasks((current) => response.data.tasks.reduce(upsertTask, current))
       showToast(
         response.data.sessions.length === 1
           ? "1 Grok session refreshed"
@@ -356,7 +322,7 @@ export function App() {
     }
     try {
       const response = await api.invoke("sessions.continueRecent", {
-        projectId: activeProject?.id,
+        projectId: homeProject?.id,
       })
       if (!response.ok) throw new Error(response.error.message)
       if (!response.data.task) {
@@ -370,7 +336,22 @@ export function App() {
         error instanceof Error ? error.message : "Could not continue session",
       )
     }
-  }, [activeProject?.id, api, selectTask, showToast])
+  }, [api, homeProject?.id, selectTask, showToast])
+
+  const stopTask = useCallback(
+    async (task: Task) => {
+      if (!api) return
+      try {
+        await api.cancelTask(task.id)
+        showToast("Stopping after the current step")
+      } catch (error) {
+        showToast(
+          error instanceof Error ? error.message : "Could not stop task",
+        )
+      }
+    },
+    [api, showToast],
+  )
 
   const renameSession = useCallback(
     async (task: Task) => {
@@ -405,11 +386,7 @@ export function App() {
         if (!response.ok) throw new Error(response.error.message)
         setTasks((current) => upsertTask(current, response.data.task))
         if (archived && activeTaskId === task.id) {
-          const fallback = tasks.find(
-            (candidate) => candidate.id !== task.id && !candidate.archived,
-          )
-          if (fallback) await selectTask(fallback.id)
-          else setActiveTaskId(null)
+          setScreen("home")
         }
         showToast(archived ? "Session archived" : "Session restored")
       } catch (error) {
@@ -418,7 +395,7 @@ export function App() {
         )
       }
     },
-    [activeTaskId, api, selectTask, showToast, tasks],
+    [activeTaskId, api, showToast],
   )
 
   const exportSession = useCallback(
@@ -474,7 +451,7 @@ export function App() {
       const optimistic = { ...settings, ...patch }
       setSettings(optimistic)
       if (patch.showActivityPanel !== undefined) {
-        setActivityOpen(patch.showActivityPanel)
+        setPaneOpen(patch.showActivityPanel)
       }
       if (!api) return
       try {
@@ -482,147 +459,248 @@ export function App() {
         setSettings(saved)
       } catch (error) {
         setSettings(previous)
-        showToast(error instanceof Error ? error.message : "Could not save settings")
+        showToast(
+          error instanceof Error ? error.message : "Could not save settings",
+        )
       }
     },
     [api, settings, showToast],
   )
 
+  const toggleTheme = useCallback(() => {
+    void updateSettings({
+      theme: resolvedTheme === "dark" ? "light" : "dark",
+    })
+  }, [resolvedTheme, updateSettings])
+
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       const command = isMac(platform) ? event.metaKey : event.ctrlKey
+      if (event.key === "Escape") {
+        setPaletteOpen(false)
+        setSettingsOpen(false)
+        setInboxOpen(false)
+        return
+      }
       if (!command) return
+      if (event.key.toLowerCase() === "k") {
+        event.preventDefault()
+        setPaletteOpen((open) => !open)
+      }
+      if (event.key === ",") {
+        event.preventDefault()
+        setSettingsOpen(true)
+      }
       if (event.key === "\\") {
         event.preventDefault()
-        setSidebarOpen((open) => !open)
+        setPaneOpen((open) => !open)
       }
       if (event.key.toLowerCase() === "n") {
         event.preventDefault()
         void createTask()
-      }
-      if (event.key === ",") {
-        event.preventDefault()
-        setScreen("settings")
       }
     }
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
   }, [createTask, platform])
 
-  return (
-    <div className="app-shell agents-shell" data-agents="true" data-platform={platform}>
-      <WindowChrome platform={platform} />
+  const unreadInbox = inbox.filter((item) => !item.read).length
+  const runningCount = tasks.filter(
+    (task) => !task.archived && cardStatus(task) === "running",
+  ).length
+  const reviewCount = tasks.filter(
+    (task) =>
+      !task.archived &&
+      (cardStatus(task) === "review" || cardStatus(task) === "error"),
+  ).length
 
-      {sidebarOpen && (
-        <Sidebar
-          activeTaskId={activeTaskId}
-          canGoBack={taskHistoryState.canGoBack}
-          canGoForward={taskHistoryState.canGoForward}
-          onAddProject={addProject}
+  const inSession = screen === "session" && activeTask !== null
+  const crumb = inSession
+    ? `${activeProject?.name ?? ""} / ${activeTask?.title ?? ""}`
+    : `Nolira workspace · ${projects.length} ${projects.length === 1 ? "project" : "projects"}`
+
+  const paletteCommands: PaletteCommand[] = [
+    {
+      id: "new-task",
+      label: "New task",
+      icon: "add",
+      meta: isMac(platform) ? "⌘ N" : "Ctrl N",
+      run: () => void createTask(),
+    },
+    {
+      id: "inbox",
+      label: "Open Inbox",
+      icon: "bell",
+      run: () => setInboxOpen(true),
+    },
+    {
+      id: "theme",
+      label: "Toggle theme",
+      icon: resolvedTheme === "dark" ? "sun" : "moon",
+      run: toggleTheme,
+    },
+    {
+      id: "board",
+      label: "Board view",
+      icon: "board",
+      run: () => {
+        setScreen("home")
+        setView("board")
+      },
+    },
+    {
+      id: "grid",
+      label: "Grid view",
+      icon: "grid",
+      run: () => {
+        setScreen("home")
+        setView("grid")
+      },
+    },
+    {
+      id: "settings",
+      label: "Open settings",
+      icon: "sliders",
+      meta: isMac(platform) ? "⌘ ," : "Ctrl ,",
+      run: () => setSettingsOpen(true),
+    },
+    {
+      id: "refresh",
+      label: "Refresh Grok sessions",
+      icon: "refresh",
+      run: () => void refreshSessions(),
+    },
+    {
+      id: "continue",
+      label: "Continue recent session",
+      icon: "history",
+      run: () => void continueRecentSession(),
+    },
+    {
+      id: "add-project",
+      label: "Add project",
+      icon: "folder-plus",
+      run: () => void addProject(),
+    },
+  ]
+
+  const taskActions = {
+    onOpen: (task: Task) => void selectTask(task.id),
+    onStop: (task: Task) => void stopTask(task),
+    onRename: (task: Task) => void renameSession(task),
+    onExport: (task: Task) => void exportSession(task),
+    onArchive: (task: Task) => void archiveSession(task),
+  }
+
+  return (
+    <div className="nol-shell" data-platform={platform}>
+      <AppHeader
+        crumb={crumb}
+        hasUnreadInbox={unreadInbox > 0}
+        inSession={inSession}
+        onGoHome={goHome}
+        onOpenInbox={() => setInboxOpen(true)}
+        onOpenSearch={() => setPaletteOpen(true)}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onToggleTheme={toggleTheme}
+        platform={platform}
+        theme={resolvedTheme}
+      />
+
+      {inSession && activeTask ? (
+        <SessionView
+          apiAvailable={Boolean(api)}
+          key={activeTask.id}
+          models={models}
+          onArchive={taskActions.onArchive}
           onCreateTask={createTask}
-          onGoBack={() => navigateTaskHistory(-1)}
-          onGoForward={() => navigateTaskHistory(1)}
-          onContinueRecent={continueRecentSession}
-          onRefreshSessions={refreshSessions}
-          onRenameSession={renameSession}
-          onArchiveSession={archiveSession}
-          onExportSession={exportSession}
-          onOpenSettings={() => setScreen("settings")}
-          onOpenInbox={() => setScreen("inbox")}
-          onSelectTask={selectTask}
-          onToggleSidebar={() => setSidebarOpen(false)}
-          platform={platform}
-          projects={projects}
+          onExport={taskActions.onExport}
+          onRename={taskActions.onRename}
+          onSendError={showToast}
+          onStop={taskActions.onStop}
+          onTogglePane={() => setPaneOpen((open) => !open)}
+          paneOpen={paneOpen}
+          project={activeProject}
           runtime={runtime}
+          settings={settings}
+          task={activeTask}
+        />
+      ) : (
+        <HomeView
+          apiAvailable={Boolean(api)}
+          models={models}
+          onAddProject={() => void addProject()}
+          onCreateTask={createTask}
+          onRefresh={refreshSessions}
+          onSelectProject={setSelectedProjectId}
+          onSendError={showToast}
+          onViewChange={setView}
+          projects={projects}
+          selectedProjectId={homeProject?.id ?? null}
+          settings={settings}
+          taskActions={taskActions}
           tasks={tasks}
-          unreadInboxCount={inbox.filter((item) => !item.read).length}
+          view={view}
         />
       )}
 
-      <div className="workspace-shell">
-        {screen === "settings" ? (
-          <SettingsView
-            onBack={() => setScreen("workspace")}
-            onNotify={showToast}
-            onUpdate={updateSettings}
-            platform={platform}
-            projects={projects}
-            runtime={runtime}
-            settings={settings}
-            sidebarOpen={sidebarOpen}
-            toggleSidebar={() => setSidebarOpen((open) => !open)}
-          />
-        ) : screen === "inbox" ? (
-          <InboxView
-            inbox={inbox}
-            onBack={() => setScreen("workspace")}
-            onDismiss={(id) => void updateInbox("inbox.dismiss", { id })}
-            onMarkAllRead={() => void updateInbox("inbox.markAllRead", {})}
-            onOpenItem={(item) => {
-              if (!item.read) {
-                void updateInbox("inbox.markRead", { id: item.id, read: true })
-              }
-              if (item.taskId) void selectTask(item.taskId)
-            }}
-            platform={platform}
-            sidebarOpen={sidebarOpen}
-            toggleSidebar={() => setSidebarOpen((open) => !open)}
-          />
-        ) : (
-          <div className="work-area" data-activity-open={activityOpen}>
-            <div className="workspace-primary">
-              <WorkspaceHeader
-                activityOpen={activityOpen}
-                onCreateTask={() => void createTask()}
-                onToggleActivity={() => {
-                  const next = !activityOpen
-                  setActivityOpen(next)
-                  void updateSettings({ showActivityPanel: next })
-                }}
-                onToggleSidebar={() => setSidebarOpen((open) => !open)}
-                project={activeProject}
-                sidebarOpen={sidebarOpen}
-                task={activeTask}
-              />
-              <ChatWorkspace
-                key={activeTask?.id ?? activeProject?.id ?? "new-workspace"}
-                apiAvailable={Boolean(api)}
-                models={models}
-                onAddProject={addProject}
-                onCreateTask={createTask}
-                onSendError={showToast}
-                project={activeProject}
-                settings={settings}
-                task={activeTask}
-              />
-            </div>
-            {activityOpen && (
-              <ActivityPanel
-                onClose={() => {
-                  setActivityOpen(false)
-                  void updateSettings({ showActivityPanel: false })
-                }}
-                project={activeProject}
-                runtime={runtime}
-                task={activeTask}
-                onNotify={showToast}
-              />
-            )}
-          </div>
-        )}
-      </div>
+      <StatusFooter
+        model={settings.defaultModel}
+        path={homeProject?.path ?? ""}
+        platform={platform}
+        reviewCount={reviewCount}
+        runningCount={runningCount}
+        runtime={runtime}
+      />
+
+      {inboxOpen && (
+        <InboxDialog
+          inbox={inbox}
+          onClose={() => setInboxOpen(false)}
+          onDismiss={(id) => void updateInbox("inbox.dismiss", { id })}
+          onMarkAllRead={() => void updateInbox("inbox.markAllRead", {})}
+          onOpenItem={(item) => {
+            if (!item.read) {
+              void updateInbox("inbox.markRead", { id: item.id, read: true })
+            }
+            setInboxOpen(false)
+            if (item.taskId) void selectTask(item.taskId)
+          }}
+          projects={projects}
+          tasks={tasks}
+        />
+      )}
+
+      {settingsOpen && (
+        <SettingsDialog
+          models={models}
+          onClose={() => setSettingsOpen(false)}
+          onNotify={showToast}
+          onUpdate={(patch) => void updateSettings(patch)}
+          platform={platform}
+          projects={projects}
+          runtime={runtime}
+          settings={settings}
+        />
+      )}
+
+      {paletteOpen && (
+        <CommandPalette
+          commands={paletteCommands}
+          onClose={() => setPaletteOpen(false)}
+          onOpenTask={(taskId) => void selectTask(taskId)}
+          projects={projects}
+          tasks={tasks}
+        />
+      )}
 
       {loading && (
-        <div className="loading-cover agents-loading">
-          <div className="agents-welcome-splash" aria-hidden="true">
-            <div className="agents-welcome-glow" />
-            <div className="agents-welcome-mark">
-              <BrandMark size={40} />
-            </div>
-          </div>
+        <div className="nol-loading">
+          <div className="nol-loading-mark" aria-hidden="true" />
           <span>Opening Agents…</span>
         </div>
       )}
+
       {permission && (
         <PermissionDialog
           apiAvailable={Boolean(api)}
@@ -631,7 +709,8 @@ export function App() {
           request={permission}
         />
       )}
-      {toast && <div className="toast">{toast}</div>}
+
+      {toast && <div className="nol-toast">{toast}</div>}
     </div>
   )
 }
