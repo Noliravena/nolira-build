@@ -140,13 +140,16 @@ function assertTrustedSender(event: IpcMainInvokeEvent): void {
 }
 
 function windowOptions(): BrowserWindowConstructorOptions {
+  const dark = nativeTheme.shouldUseDarkColors
+  // Solid Cursor Agents palette (no vibrancy / no transparent shell).
+  const backgroundColor = dark ? '#0c0e11' : '#f7f7f4'
   const common: BrowserWindowConstructorOptions = {
-    width: 1400,
-    height: 900,
+    width: 1440,
+    height: 920,
     minWidth: 500,
     minHeight: 600,
     show: false,
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0a0a0a' : '#ffffff',
+    backgroundColor,
     autoHideMenuBar: process.platform !== 'darwin',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -164,15 +167,17 @@ function windowOptions(): BrowserWindowConstructorOptions {
       ...common,
       frame: true,
       titleBarStyle: 'hiddenInset',
-      trafficLightPosition: { x: 15, y: 12 }
+      trafficLightPosition: { x: 14, y: 12 },
+      transparent: false,
+      hasShadow: true,
+      roundedCorners: true
     }
   }
 
   if (process.platform === 'win32') {
     return {
       ...common,
-      frame: false,
-      backgroundMaterial: 'mica'
+      frame: false
     }
   }
 

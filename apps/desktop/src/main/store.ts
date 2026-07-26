@@ -171,7 +171,7 @@ const DEFAULT_SETTINGS: AppSettingsRecord = {
   defaultModel: 'grok-4.5',
   defaultEffort: 'high',
   defaultPermissionMode: 'default',
-  theme: 'system',
+  theme: 'dark',
   showActivityPanel: false,
   notifications: true
 }
