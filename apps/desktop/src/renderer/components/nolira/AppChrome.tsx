@@ -117,24 +117,45 @@ export function AppHeader({
           <button
             type="button"
             aria-label="Minimize window"
+            title="Minimize"
             onClick={() => window.nolira?.windowControl?.("minimize")}
           >
-            <span className="nol-win-min" />
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <path d="M0 5h10" stroke="currentColor" strokeWidth="1" />
+            </svg>
           </button>
           <button
             type="button"
             aria-label="Maximize window"
+            title="Maximize"
             onClick={() => window.nolira?.windowControl?.("maximize")}
           >
-            <span className="nol-win-glyph" />
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <rect
+                x="0.5"
+                y="0.5"
+                width="9"
+                height="9"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1"
+              />
+            </svg>
           </button>
           <button
             type="button"
             className="nol-win-close"
             aria-label="Close window"
+            title="Close"
             onClick={() => window.nolira?.windowControl?.("close")}
           >
-            <Icon name="close" size={15} />
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <path
+                d="M0 0 10 10M10 0 0 10"
+                stroke="currentColor"
+                strokeWidth="1"
+              />
+            </svg>
           </button>
         </div>
       )}

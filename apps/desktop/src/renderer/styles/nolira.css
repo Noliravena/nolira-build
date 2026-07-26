@@ -382,39 +382,53 @@
   flex: none;
 }
 
+/* Windows / Linux caption buttons — native Windows 11 style:
+   flush to the top-right corner, full-height 46px strips, thin 1px
+   glyphs, subtle hover, red close. */
+.nol-header[data-platform="win32"],
+.nol-header[data-platform="linux"] {
+  padding-right: 0;
+}
 .nol-win-controls {
   display: flex;
-  gap: 2px;
-  margin-left: 4px;
+  align-self: stretch;
+  margin-left: 6px;
 }
 .nol-win-controls button {
-  width: 34px;
-  height: 30px;
+  width: 46px;
+  height: 100%;
   display: grid;
   place-items: center;
   border: none;
+  border-radius: 0;
   background: transparent;
-  color: var(--mu);
-  border-radius: 7px;
-  cursor: pointer;
+  color: var(--tx);
+  cursor: default;
+  padding: 0;
+  transition: background-color 90ms;
+}
+.nol-win-controls button svg {
+  display: block;
 }
 .nol-win-controls button:hover {
-  background: var(--bg3);
-  color: var(--tx);
+  background: rgba(255, 255, 255, 0.09);
+}
+.nol-win-controls button:active {
+  background: rgba(255, 255, 255, 0.06);
+}
+:root[data-theme="light"] .nol-win-controls button:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+:root[data-theme="light"] .nol-win-controls button:active {
+  background: rgba(0, 0, 0, 0.04);
 }
 .nol-win-controls button.nol-win-close:hover {
-  background: #c0392b;
-  color: #fff;
+  background: #c42b1c;
+  color: #ffffff;
 }
-.nol-win-controls .nol-win-glyph {
-  width: 10px;
-  height: 10px;
-  border: 1.4px solid currentColor;
-}
-.nol-win-controls .nol-win-min {
-  width: 10px;
-  height: 0;
-  border-bottom: 1.4px solid currentColor;
+.nol-win-controls button.nol-win-close:active {
+  background: #b3271a;
+  color: rgba(255, 255, 255, 0.8);
 }
 
 /* ---------- Menus (self-drawn dropdowns) ---------- */
