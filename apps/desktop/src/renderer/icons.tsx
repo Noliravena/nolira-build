@@ -1,5 +1,9 @@
 import type { CSSProperties, ReactNode, SVGProps } from "react"
 
+/**
+ * Icon set aligned to Cursor Agents / codicon + Lucide stroke language:
+ * 24 viewBox, 1.5 stroke, rounded caps, secondary opacity for chrome icons.
+ */
 export type IconName =
   | "activity"
   | "add"
@@ -36,81 +40,146 @@ interface IconProps extends SVGProps<SVGSVGElement> {
 }
 
 const stroke: Record<IconName, ReactNode> = {
-  activity: <path d="M3 12h3l2.2-6.1L12 18l2.5-8 1.8 4H21" />,
-  add: <path d="M12 5v14M5 12h14" />,
-  "arrow-up": <path d="m6 10 6-6 6 6M12 4v16" />,
-  attachment: (
-    <path d="m20.5 11.5-8.8 8.8a6 6 0 0 1-8.5-8.5L13.1 2a4 4 0 0 1 5.7 5.7l-9.9 9.9a2 2 0 0 1-2.8-2.8L15 6" />
+  // activity / pulse
+  activity: (
+    <path d="M3 12h4l2-7 4 14 2-7h6" />
   ),
-  brain: (
+  // plus (codicon-add)
+  add: (
     <>
-      <path d="M9.5 4.5A3.5 3.5 0 0 0 6 8v.3A3.5 3.5 0 0 0 4 14a3.5 3.5 0 0 0 5.5 2.9V4.5Z" />
-      <path d="M14.5 4.5A3.5 3.5 0 0 1 18 8v.3a3.5 3.5 0 0 1 2 5.7 3.5 3.5 0 0 1-5.5 2.9V4.5ZM9.5 9H7m7.5 3H17m-7.5 4H7" />
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
     </>
   ),
-  check: <path d="m5 12 4 4L19 6" />,
+  // send / arrow up
+  "arrow-up": (
+    <>
+      <path d="M12 19V5" />
+      <path d="m5 12 7-7 7 7" />
+    </>
+  ),
+  // paperclip
+  attachment: (
+    <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+  ),
+  // reasoning
+  brain: (
+    <>
+      <path d="M12 5a3 3 0 0 0-3 3v1a3 3 0 0 0-2 2.7A3 3 0 0 0 9 17h.5" />
+      <path d="M12 5a3 3 0 0 1 3 3v1a3 3 0 0 1 2 2.7A3 3 0 0 1 15 17h-.5" />
+      <path d="M9.5 17v2M14.5 17v2M9.5 9H8M14.5 12H16" />
+    </>
+  ),
+  check: <path d="m5 12 5 5L20 7" />,
   "chevron-down": <path d="m6 9 6 6 6-6" />,
   "chevron-left": <path d="m15 18-6-6 6-6" />,
   "chevron-right": <path d="m9 18 6-6-6-6" />,
-  close: <path d="m6 6 12 12M18 6 6 18" />,
-  code: <path d="m8 9-4 3 4 3m8-6 4 3-4 3m-2-9-4 12" />,
-  compose: (
+  close: (
     <>
-      <path d="M13 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
-      <path d="m17.5 3.5 3 3L11 16l-4 1 1-4 9.5-9.5Z" />
+      <path d="m6 6 12 12" />
+      <path d="m18 6-12 12" />
     </>
   ),
-  folder: <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5v-11Z" />,
-  "folder-open": <path d="M3 7h6l2 2h8.5a1.5 1.5 0 0 1 1.4 2l-2 6A1.5 1.5 0 0 1 17.5 18h-13A1.5 1.5 0 0 1 3 16.5V7Zm0 4h17" />,
+  code: (
+    <>
+      <path d="m8 8-4 4 4 4" />
+      <path d="m16 8 4 4-4 4" />
+      <path d="m14 5-4 14" />
+    </>
+  ),
+  // compose / new agent (pen-square-ish)
+  compose: (
+    <>
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4 11.5-11.5Z" />
+    </>
+  ),
+  folder: (
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
+  ),
+  "folder-open": (
+    <path d="M3 7h6l2 2h8a2 2 0 0 1 1.9 2.6l-1.8 6A2 2 0 0 1 17.2 19H5a2 2 0 0 1-2-2V7Z" />
+  ),
+  // settings gear simplified
   gear: (
     <>
       <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" />
+      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
     </>
   ),
   image: (
     <>
       <rect x="3" y="4" width="18" height="16" rx="2" />
-      <circle cx="8.5" cy="9" r="1.5" />
-      <path d="m21 15-5-5L5 20" />
+      <circle cx="9" cy="10" r="1.5" />
+      <path d="m21 16-5-5-4 4-2-2-5 5" />
     </>
   ),
   inbox: (
     <>
-      <path d="m4 4 16 0 2 9v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6l2-9Z" />
-      <path d="M2 13h5l2 3h6l2-3h5" />
+      <path d="M22 12h-6l-2 3h-4l-2-3H2" />
+      <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z" />
     </>
   ),
   info: (
     <>
       <circle cx="12" cy="12" r="9" />
-      <path d="M12 11v5m0-8h.01" />
+      <path d="M12 11v5" />
+      <path d="M12 8h.01" />
     </>
   ),
-  "layout-left": <path d="M4 4h16v16H4V4Zm5 0v16" />,
-  "layout-right": <path d="M4 4h16v16H4V4Zm11 0v16" />,
+  // panel left
+  "layout-left": (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M9 4v16" />
+    </>
+  ),
+  "layout-right": (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M15 4v16" />
+    </>
+  ),
   more: (
     <>
-      <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />
-      <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
-      <circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" />
+      <circle cx="6" cy="12" r="1.15" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.15" fill="currentColor" stroke="none" />
+      <circle cx="18" cy="12" r="1.15" fill="currentColor" stroke="none" />
     </>
   ),
-  pause: <path d="M9 5v14m6-14v14" />,
+  pause: (
+    <>
+      <path d="M8 5v14" />
+      <path d="M16 5v14" />
+    </>
+  ),
   play: <path d="m8 5 11 7-11 7V5Z" />,
   search: (
     <>
-      <circle cx="11" cy="11" r="7" />
-      <path d="m16 16 4 4" />
+      <circle cx="11" cy="11" r="6.5" />
+      <path d="m16 16 4.5 4.5" />
     </>
   ),
-  spark: <path d="m12 2 1.5 5.2L19 9l-5.5 1.8L12 16l-1.5-5.2L5 9l5.5-1.8L12 2Zm7 13 .7 2.3L22 18l-2.3.7L19 21l-.7-2.3L16 18l2.3-.7L19 15Z" />,
-  stop: <rect x="7" y="7" width="10" height="10" rx="2" />,
-  terminal: <path d="m4 7 5 5-5 5m8 0h8" />,
+  // sparkle (codicon-sparkle)
+  spark: (
+    <>
+      <path d="m12 3 1.4 4.3L18 9l-4.6 1.7L12 15l-1.4-4.3L6 9l4.6-1.7L12 3Z" />
+      <path d="m19 14 .8 2.4L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.6L19 14Z" />
+    </>
+  ),
+  // stop square (filled feel via thicker path)
+  stop: <rect x="7" y="7" width="10" height="10" rx="1.5" />,
+  terminal: (
+    <>
+      <path d="m5 8 5 4-5 4" />
+      <path d="M12 16h7" />
+    </>
+  ),
   warning: (
     <>
-      <path d="M10.3 3.8 2.5 18a2 2 0 0 0 1.8 3h15.4a2 2 0 0 0 1.8-3L13.7 3.8a2 2 0 0 0-3.4 0Z" />
-      <path d="M12 9v4m0 4h.01" />
+      <path d="m10.3 4.3-7.6 13A2 2 0 0 0 4.4 20h15.2a2 2 0 0 0 1.7-2.7l-7.6-13a2 2 0 0 0-3.4 0Z" />
+      <path d="M12 9v4" />
+      <path d="M12 16h.01" />
     </>
   ),
 }
@@ -119,12 +188,14 @@ export function Icon({
   name,
   size = 16,
   style,
+  className,
   ...props
 }: IconProps) {
   const iconStyle: CSSProperties = { flex: "0 0 auto", ...style }
   return (
     <svg
       aria-hidden="true"
+      className={className ? `ui-icon ${className}` : "ui-icon"}
       fill="none"
       height={size}
       viewBox="0 0 24 24"
@@ -132,7 +203,7 @@ export function Icon({
       stroke="currentColor"
       strokeLinecap="round"
       strokeLinejoin="round"
-      strokeWidth="1.75"
+      strokeWidth="1.5"
       style={iconStyle}
       {...props}
     >
