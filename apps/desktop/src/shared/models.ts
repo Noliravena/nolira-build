@@ -10,6 +10,7 @@ export type MessageRole = 'user' | 'assistant' | 'system'
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max'
 export type PermissionMode = 'default' | 'accept-edits' | 'full-access'
 export type ThemeMode = 'system' | 'light' | 'dark'
+export type AccentColor = 'ember' | 'blue' | 'violet' | 'mint'
 export type SessionSource = 'desktop' | 'grok'
 
 export type GoalStatus = 'active' | 'paused' | 'completed' | 'cancelled' | 'error'
@@ -210,6 +211,7 @@ export interface AppSettings {
   defaultEffort: EffortLevel
   defaultPermissionMode: PermissionMode
   theme: ThemeMode
+  accent: AccentColor
   showActivityPanel: boolean
   notifications: boolean
 }
@@ -256,6 +258,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultEffort: 'high',
   defaultPermissionMode: 'default',
   theme: 'dark',
+  accent: 'ember',
   showActivityPanel: false,
   notifications: true
 }
