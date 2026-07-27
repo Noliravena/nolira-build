@@ -69,6 +69,18 @@ describe('SessionIndexService', () => {
           }
         },
         { type: 'tool_result', tool_call_id: 'tool-1', content: 'file contents' },
+        {
+          type: 'assistant',
+          content: '',
+          tool_calls: [
+            {
+              id: 'tool-2',
+              name: 'write_file',
+              arguments: { path: 'src/App.tsx', content: 'updated' }
+            }
+          ]
+        },
+        { type: 'tool_result', tool_call_id: 'tool-2', content: 'updated file' },
         { type: 'assistant', content: 'The session view needs a history loader.' }
       ]
         .map((entry) => JSON.stringify(entry))
@@ -110,11 +122,19 @@ describe('SessionIndexService', () => {
           status: 'success',
           output: 'file contents'
         },
+        {
+          type: 'tool',
+          title: 'Write File',
+          kind: 'write_file',
+          status: 'success',
+          input: expect.stringContaining('src/App.tsx'),
+          output: 'updated file'
+        },
         { type: 'text', text: 'The session view needs a history loader.' }
       ]
     })
     expect(history.messages[1]?.parts.filter((part) => part.type === 'tool')).toHaveLength(
-      1
+      2
     )
 
     const exported = await service.exportMarkdown(sessionId)

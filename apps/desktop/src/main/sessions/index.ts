@@ -377,12 +377,45 @@ async function parseChatHistory(
 
       if (type === 'assistant') {
         const text = readableContent(decoded.content)
-        if (!text) continue
-        assistantMessage().parts.push({
-          id: `${taskId}:text:${recordIndex}`,
-          type: 'text',
-          text
-        })
+        if (text) {
+          assistantMessage().parts.push({
+            id: `${taskId}:text:${recordIndex}`,
+            type: 'text',
+            text
+          })
+        }
+        if (Array.isArray(decoded.tool_calls)) {
+          for (const value of decoded.tool_calls) {
+            if (!isRecord(value)) continue
+            const nested = isRecord(value.function) ? value.function : undefined
+            const toolId =
+              stringValue(value.id) ??
+              stringValue(value.tool_call_id) ??
+              `${taskId}:tool-call:${recordIndex}:${toolParts.size}`
+            const name =
+              stringValue(value.name) ??
+              stringValue(nested?.name) ??
+              'Tool'
+            const part: Extract<MessagePart, { type: 'tool' }> = {
+              id: `${taskId}:tool:${toolId}`,
+              type: 'tool',
+              title: humanize(name),
+              kind: name,
+              status: 'running',
+              input: readableToolArguments(value.arguments ?? nested?.arguments)
+            }
+            const existing = toolParts.get(toolId)
+            if (existing) {
+              existing.title = part.title
+              existing.kind = part.kind
+              existing.status = part.status
+              existing.input = part.input ?? existing.input
+            } else {
+              assistantMessage().parts.push(part)
+              toolParts.set(toolId, part)
+            }
+          }
+        }
         continue
       }
 
@@ -426,7 +459,13 @@ async function parseChatHistory(
         const part = toolId ? toolParts.get(toolId) : undefined
         if (part) {
           part.output = output
-          part.status = 'success'
+          part.status =
+            decoded.is_error === true ||
+            ['error', 'failed'].includes(
+              stringValue(decoded.status)?.toLocaleLowerCase() ?? ''
+            )
+              ? 'error'
+              : 'success'
         } else if (output) {
           assistantMessage().parts.push({
             id: `${taskId}:tool-result:${recordIndex}`,
@@ -502,6 +541,16 @@ function readableToolValue(value: unknown): string | undefined {
     return truncate(JSON.stringify(value, null, 2), 200_000)
   } catch {
     return String(value)
+  }
+}
+
+function readableToolArguments(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value === 'string') return truncate(value, 200_000)
+  try {
+    return truncate(JSON.stringify(value, null, 2), 200_000)
+  } catch {
+    return truncate(String(value), 200_000)
   }
 }
 
