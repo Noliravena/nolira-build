@@ -203,6 +203,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export class DesktopStore {
   private state: PersistedState = clone(EMPTY_STATE)
   private writeQueue: Promise<void> = Promise.resolve()
+  private deferredPersistTimer?: NodeJS.Timeout
+  private deferredPersistPending = false
 
   constructor(private readonly filePath: string) {}
 
@@ -423,15 +425,26 @@ export class DesktopStore {
   async updateMessage(
     taskId: string,
     messageId: string,
-    updater: (message: MessageRecord) => void
+    updater: (message: MessageRecord) => void,
+    options: { deferPersist?: boolean } = {}
   ): Promise<MessageRecord> {
     const task = this.requireTask(taskId)
     const message = task.messages.find((entry) => entry.id === messageId)
     if (!message) throw new Error('Message does not exist.')
     updater(message)
     task.updatedAt = new Date().toISOString()
-    await this.persist()
+    if (options.deferPersist) this.schedulePersist()
+    else await this.persist()
     return clone(message)
+  }
+
+  async flush(): Promise<void> {
+    if (this.deferredPersistPending) {
+      this.cancelDeferredPersist()
+      await this.enqueuePersist()
+      return
+    }
+    await this.writeQueue
   }
 
   getSettings(): AppSettingsRecord {
@@ -440,6 +453,56 @@ export class DesktopStore {
 
   listInbox(): InboxRecord[] {
     return clone(this.state.inbox)
+  }
+
+  async recoverInterruptedTasks(): Promise<{
+    tasks: TaskRecord[]
+    requestIds: string[]
+    inbox: InboxRecord[]
+  }> {
+    const interrupted = this.state.tasks.filter((task) =>
+      ['starting', 'running', 'waiting'].includes(task.status)
+    )
+    const stalePermissions = this.state.inbox.filter(
+      (item) => item.type === 'permission'
+    )
+    if (interrupted.length === 0 && stalePermissions.length === 0) {
+      return { tasks: [], requestIds: [], inbox: this.listInbox() }
+    }
+
+    const message =
+      'This task was interrupted when Nolira Build stopped. Send a new prompt to reconnect.'
+    for (const task of interrupted) {
+      task.status = 'error'
+      task.error = message
+      task.updatedAt = new Date().toISOString()
+      for (const entry of task.messages) {
+        if (!entry.streaming) continue
+        entry.streaming = false
+        for (const part of entry.parts) {
+          if (part.type === 'thinking') part.status = 'complete'
+        }
+        entry.parts.push({
+          id: randomUUID(),
+          type: 'error',
+          title: 'Task interrupted',
+          text: message
+        })
+      }
+    }
+
+    this.state.inbox = this.state.inbox.filter(
+      (item) => !stalePermissions.some((stale) => stale.id === item.id)
+    )
+    await this.persist()
+
+    return {
+      tasks: clone(interrupted),
+      requestIds: stalePermissions.flatMap((item) =>
+        item.sourceId ? [item.sourceId] : []
+      ),
+      inbox: this.listInbox()
+    }
   }
 
   async addInbox(
@@ -495,6 +558,27 @@ export class DesktopStore {
     return this.listInbox()
   }
 
+  async clearPermissionInboxForTask(taskId: string): Promise<{
+    requestIds: string[]
+    items: InboxRecord[]
+  }> {
+    const removed = this.state.inbox.filter(
+      (item) => item.taskId === taskId && item.type === 'permission'
+    )
+    if (removed.length === 0) {
+      return { requestIds: [], items: this.listInbox() }
+    }
+    const removedIds = new Set(removed.map((item) => item.id))
+    this.state.inbox = this.state.inbox.filter((item) => !removedIds.has(item.id))
+    await this.persist()
+    return {
+      requestIds: removed.flatMap((item) =>
+        item.sourceId ? [item.sourceId] : []
+      ),
+      items: this.listInbox()
+    }
+  }
+
   async updateSettings(
     patch: Partial<AppSettingsRecord>
   ): Promise<AppSettingsRecord> {
@@ -521,6 +605,31 @@ export class DesktopStore {
   }
 
   private async persist(): Promise<void> {
+    this.cancelDeferredPersist()
+    return this.enqueuePersist()
+  }
+
+  private schedulePersist(): void {
+    this.deferredPersistPending = true
+    if (this.deferredPersistTimer) return
+    this.deferredPersistTimer = setTimeout(() => {
+      this.deferredPersistTimer = undefined
+      if (!this.deferredPersistPending) return
+      this.deferredPersistPending = false
+      void this.enqueuePersist().catch((error: unknown) => {
+        console.warn('Unable to persist desktop state.', error)
+      })
+    }, 250)
+    this.deferredPersistTimer.unref()
+  }
+
+  private cancelDeferredPersist(): void {
+    if (this.deferredPersistTimer) clearTimeout(this.deferredPersistTimer)
+    this.deferredPersistTimer = undefined
+    this.deferredPersistPending = false
+  }
+
+  private async enqueuePersist(): Promise<void> {
     const persistedState: PersistedState = {
       ...this.state,
       tasks: this.state.tasks.map((task) =>
