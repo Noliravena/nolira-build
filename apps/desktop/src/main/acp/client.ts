@@ -40,6 +40,7 @@ import {
 } from './jsonrpc'
 
 const DEFAULT_RPC_TIMEOUT_MS = 120_000
+const CANCEL_RPC_TIMEOUT_MS = 5_000
 const PROMPT_RPC_TIMEOUT_MS = 6 * 60 * 60 * 1_000
 
 interface PendingRpc {
@@ -285,8 +286,31 @@ export class GrokAcpClient {
   async cancel(): Promise<void> {
     const sessionId = this.sessionId
     if (!sessionId) return
+    for (const parked of this.pendingPermissions.values()) {
+      const optionId = optionIdForDecision('deny', parked.options)
+      this.write({
+        jsonrpc: '2.0',
+        id: parked.rpcId,
+        result: optionId
+          ? { outcome: { outcome: 'selected', optionId } }
+          : { outcome: { outcome: 'cancelled' } }
+      })
+    }
+    this.pendingPermissions.clear()
+    for (const approval of this.pendingPlanApprovals.values()) {
+      this.write({
+        jsonrpc: '2.0',
+        id: approval.rpcId,
+        result: { outcome: 'abandoned' }
+      })
+    }
+    this.pendingPlanApprovals.clear()
     try {
-      await this.request('session/cancel', { sessionId })
+      await this.request(
+        'session/cancel',
+        { sessionId },
+        CANCEL_RPC_TIMEOUT_MS
+      )
     } finally {
       this.promptInFlight = false
       this.emit({
@@ -313,7 +337,7 @@ export class GrokAcpClient {
         id: planApproval.rpcId,
         result: { outcome }
       })
-      this.emitStatus('busy', 'Plan response sent')
+      this.emitPermissionContinuationStatus('Plan response sent')
       return
     }
     if (!parked) {
@@ -328,7 +352,7 @@ export class GrokAcpClient {
       id: parked.rpcId,
       result: { outcome: { outcome: 'selected', optionId } },
     })
-    this.emitStatus('busy', 'Permission response sent')
+    this.emitPermissionContinuationStatus('Permission response sent')
   }
 
   async shutdown(emitStopped = true): Promise<void> {
@@ -578,7 +602,11 @@ export class GrokAcpClient {
     const request = mapPermissionRequest(requestId, params)
     const parked: PendingPermission = { rpcId, options: request.options }
 
-    if (this.options.permissionMode === 'auto-approve') {
+    if (
+      this.options.permissionMode === 'auto-approve' ||
+      (this.options.permissionMode === 'auto-approve-edits' &&
+        shouldAutoApproveEdit(request))
+    ) {
       const optionId = optionIdForDecision('allow-once', parked.options) ?? 'allow-once'
       this.write({
         jsonrpc: '2.0',
@@ -701,6 +729,17 @@ export class GrokAcpClient {
       payload: { message: error.message, code: error.code },
       timestamp: Date.now(),
     })
+  }
+
+  private emitPermissionContinuationStatus(detail: string): void {
+    if (
+      this.pendingPermissions.size > 0 ||
+      this.pendingPlanApprovals.size > 0
+    ) {
+      this.emitStatus('waiting-permission', 'Another approval is waiting')
+      return
+    }
+    this.emitStatus('busy', detail)
   }
 
   private emit(event: GrokAcpEvent): void {
@@ -1043,6 +1082,7 @@ export function mapPermissionRequest(requestId: string, params: JsonValue): Grok
       readString(toolCall, 'kind') ??
       readString(record, 'toolName') ??
       'Tool',
+    toolKind: readString(toolCall, 'kind') ?? readString(record, 'toolKind'),
     summary:
       readString(toolCall, 'title') ??
       readString(record, 'summary') ??
@@ -1050,6 +1090,42 @@ export function mapPermissionRequest(requestId: string, params: JsonValue): Grok
     detail: typeof rawInput === 'string' ? rawInput : rawInput === undefined ? undefined : JSON.stringify(rawInput),
     options,
   }
+}
+
+export function shouldAutoApproveEdit(
+  request: Pick<GrokPermissionRequest, 'toolKind' | 'toolName'>
+): boolean {
+  const kind = request.toolKind
+    ?.trim()
+    .toLocaleLowerCase()
+    .replace(/[-\s]+/g, '_')
+  const name = request.toolName.trim().toLocaleLowerCase()
+  if (
+    /\b(shell|terminal|command|exec|bash|powershell|run)\b/.test(
+      `${kind ?? ''} ${name}`
+    )
+  ) {
+    return false
+  }
+  const editableKinds = new Set([
+    'edit',
+    'file_edit',
+    'edit_file',
+    'write',
+    'file_write',
+    'write_file',
+    'apply_patch',
+    'create_file',
+    'delete_file',
+    'move_file',
+    'rename_file'
+  ])
+  if (kind && editableKinds.has(kind)) return true
+
+  return (
+    /^(edit|write|create|delete|move|rename) (the )?file\b/.test(name) ||
+    name === 'apply patch'
+  )
 }
 
 function optionIdForDecision(
@@ -1066,7 +1142,7 @@ function optionIdForDecision(
     const values = [option.optionId, option.kind].filter(Boolean).map((value) => value!.toLowerCase())
     return preferred.some((candidate) => values.includes(candidate))
   })
-  return matching?.optionId ?? preferred[0]
+  return matching?.optionId
 }
 
 function mapTool(update: Record<string, unknown>, isUpdate: boolean): GrokToolActivity {

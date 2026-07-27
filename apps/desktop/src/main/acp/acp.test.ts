@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
 import type { JsonValue } from '../../shared/acp'
-import { mapPermissionRequest, parseModels } from './client'
+import {
+  mapPermissionRequest,
+  parseModels,
+  shouldAutoApproveEdit
+} from './client'
 import { parseJsonRpcLine } from './jsonrpc'
 
 describe('ACP protocol parsing', () => {
@@ -75,5 +79,27 @@ describe('ACP protocol parsing', () => {
         { optionId: 'reject_once' }
       ]
     })
+  })
+
+  it('auto-approves only explicit file edits in accept-edits mode', () => {
+    expect(
+      shouldAutoApproveEdit({ toolName: 'Write fixture', toolKind: 'edit' })
+    ).toBe(true)
+    expect(shouldAutoApproveEdit({ toolName: 'Apply patch' })).toBe(true)
+    expect(
+      shouldAutoApproveEdit({
+        toolName: 'Run shell command',
+        toolKind: 'terminal'
+      })
+    ).toBe(false)
+    expect(
+      shouldAutoApproveEdit({
+        toolName: 'Run shell command',
+        toolKind: 'edit'
+      })
+    ).toBe(false)
+    expect(
+      shouldAutoApproveEdit({ toolName: 'Unknown external action' })
+    ).toBe(false)
   })
 })

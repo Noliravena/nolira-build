@@ -210,4 +210,40 @@ describe('GrokAcpClient', () => {
       await rm(directory, { force: true, recursive: true })
     }
   })
+
+  it('automatically approves explicit edit tools in accept-edits mode', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'nolira-acp-auto-edit-'))
+    const executable = join(directory, 'grok-auto-edit-mock')
+    await writeFile(executable, MOCK_AGENT)
+    await chmod(executable, 0o755)
+    const client = new GrokAcpClient({
+      taskId: 'auto-edit-task',
+      cwd: directory,
+      executablePath: executable,
+      permissionMode: 'auto-approve-edits'
+    })
+    const events: GrokAcpEvent[] = []
+    const unsubscribe = client.onEvent((event) => events.push(event))
+
+    try {
+      await client.start()
+      await client.prompt({ text: 'edit the fixture' })
+      expect(events.some((event) => event.type === 'permission-request')).toBe(
+        false
+      )
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'message-delta',
+            payload: { text: 'MOCK_PERMISSION_OK' }
+          }),
+          expect.objectContaining({ type: 'completed' })
+        ])
+      )
+    } finally {
+      unsubscribe()
+      await client.shutdown()
+      await rm(directory, { force: true, recursive: true })
+    }
+  })
 })

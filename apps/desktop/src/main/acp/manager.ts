@@ -68,7 +68,7 @@ export class GrokAcpManager {
     for (const [requestId, owner] of this.permissionOwners) {
       if (owner === taskId) this.permissionOwners.delete(requestId)
     }
-    await managed.client.shutdown()
+    await managed.client.shutdown(false)
     managed.unsubscribe()
   }
 
