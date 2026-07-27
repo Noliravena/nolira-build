@@ -33,8 +33,16 @@ import type {
   SessionListParams,
   SessionSummary
 } from '../shared/host-api'
-import type { AutomationDefinition, RuntimeStatus } from '../shared/models'
+import type {
+  AutomationDefinition,
+  PermissionRequest,
+  RuntimeStatus
+} from '../shared/models'
 import { IntegrationStore } from './integrations'
+import {
+  canonicalizeExistingPath,
+  isPathInsideCanonicalRoots
+} from './path-security'
 import { SessionIndexService } from './sessions'
 import {
   discoverSkills,
@@ -54,6 +62,7 @@ import {
   type PermissionMode,
   type TaskRecord
 } from './store'
+import { trustedDevelopmentRendererUrl } from './window-security'
 
 const userDataOverride = process.env.NOLIRA_USER_DATA_DIR
 if (userDataOverride) {
@@ -110,9 +119,12 @@ let removeManagerListener: (() => void) | undefined
 let runtimeStatus: RuntimeStatus = { state: 'checking' }
 let availableModels: string[] = []
 let automationTimer: NodeJS.Timeout | undefined
+let gracefulShutdownStarted = false
+let gracefulShutdownComplete = false
 
 const connectedTasks = new Set<string>()
 const pendingAssistants = new Map<string, PendingAssistant>()
+const pendingPermissionRequests = new Map<string, PermissionRequest>()
 const allowedAttachmentPaths = new Set<string>()
 const allowedWorkspacePaths = new Set<string>()
 const runningAutomations = new Set<string>()
@@ -203,9 +215,16 @@ async function createWindow(): Promise<void> {
     const currentUrl = mainWindow?.webContents.getURL()
     if (url !== currentUrl) event.preventDefault()
   })
+  mainWindow.webContents.on('will-attach-webview', (event) => {
+    event.preventDefault()
+  })
 
-  if (process.env.ELECTRON_RENDERER_URL) {
-    await mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+  const developmentUrl = trustedDevelopmentRendererUrl(
+    process.env.ELECTRON_RENDERER_URL,
+    app.isPackaged
+  )
+  if (developmentUrl) {
+    await mainWindow.loadURL(developmentUrl)
   } else {
     await mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
@@ -258,7 +277,7 @@ function installApplicationMenu(): void {
       submenu: [
         { role: 'reload' },
         { role: 'forceReload' },
-        ...(process.env.ELECTRON_RENDERER_URL
+        ...(!app.isPackaged && process.env.ELECTRON_RENDERER_URL
           ? ([{ role: 'toggleDevTools' }] as MenuItemConstructorOptions[])
           : []),
         { type: 'separator' },
@@ -290,8 +309,12 @@ async function getManager(): Promise<AcpManager> {
   return manager
 }
 
-async function checkRuntime(): Promise<RuntimeStatus> {
-  runtimeStatus = { state: 'checking' }
+async function checkRuntime(
+  resetAcpVerification = false
+): Promise<RuntimeStatus> {
+  const acpVerified =
+    !resetAcpVerification && Boolean(runtimeStatus.acpVerified)
+  runtimeStatus = { state: 'checking', acpVerified }
   emit({ type: 'runtime.status', payload: runtimeStatus })
 
   try {
@@ -308,12 +331,14 @@ async function checkRuntime(): Promise<RuntimeStatus> {
     const version = `${stdout || stderr}`.trim().split(/\r?\n/, 1)[0]
     runtimeStatus = {
       state: 'ready',
+      acpVerified,
       version: version || undefined,
       binaryPath: executable
     }
   } catch (error) {
     runtimeStatus = {
       state: 'offline',
+      acpVerified: false,
       message: errorMessage(error)
     }
   }
@@ -329,7 +354,8 @@ function registerIpc(): void {
     return {
       ...store.snapshot(),
       runtime: await checkRuntime(),
-      models: availableModels
+      models: availableModels,
+      pendingPermissions: [...pendingPermissionRequests.values()]
     }
   })
 
@@ -386,15 +412,21 @@ function registerIpc(): void {
 
   ipcMain.handle(channels.sendPrompt, async (event, input: unknown) => {
     assertTrustedSender(event)
-    const request = parsePromptInput(input)
+    const request = await parsePromptInput(input)
     await sendPrompt(request)
   })
 
   ipcMain.handle(channels.cancelTask, async (event, taskId: unknown) => {
     assertTrustedSender(event)
     const id = expectIdentifier(taskId, 'taskId')
-    await (await getManager()).cancel(id)
-    await updateTaskAndEmit(id, { status: 'idle' })
+    try {
+      await (await getManager()).cancel(id)
+    } catch (error) {
+      console.warn(`Grok did not acknowledge cancellation for ${id}.`, error)
+    }
+    await disconnectTask(id)
+    await finishAssistant(id, 'idle')
+    await clearPendingPermissionsForTask(id)
   })
 
   ipcMain.handle(channels.respondPermission, async (event, input: unknown) => {
@@ -403,7 +435,10 @@ function registerIpc(): void {
     const requestId = expectIdentifier(record.requestId, 'requestId')
     const optionId = expectIdentifier(record.optionId, 'optionId')
     await (await getManager()).respondPermission({ requestId, optionId })
-    const taskId = store.listInbox().find((item) => item.sourceId === requestId)?.taskId
+    const taskId =
+      pendingPermissionRequests.get(requestId)?.taskId ??
+      store.listInbox().find((item) => item.sourceId === requestId)?.taskId
+    pendingPermissionRequests.delete(requestId)
     const inbox = await store.dismissInboxBySource(requestId)
     emit({ type: 'inbox.updated', payload: inbox })
     if (taskId) {
@@ -431,7 +466,9 @@ function registerIpc(): void {
       result.filePaths.slice(0, 20).map(async (filePath): Promise<AttachmentRecord> => {
         const metadata = await stat(filePath)
         const absolutePath = resolve(filePath)
-        allowedAttachmentPaths.add(absolutePath)
+        allowedAttachmentPaths.add(
+          await canonicalizeExistingPath(absolutePath)
+        )
         return {
           id: randomUUID(),
           name: absolutePath.split(/[\\/]/).at(-1) ?? 'attachment',
@@ -450,7 +487,7 @@ function registerIpc(): void {
     nativeTheme.themeSource = settings.theme
     if (Object.prototype.hasOwnProperty.call(patch, 'grokPath')) {
       await shutdownManager()
-      void checkRuntime()
+      void checkRuntime(true)
     }
     return settings
   })
@@ -458,17 +495,27 @@ function registerIpc(): void {
   ipcMain.handle(channels.openPath, async (event, input: unknown) => {
     assertTrustedSender(event)
     const candidate = resolve(expectString(input, 'path'))
+    const canonicalCandidate = await canonicalizeExistingPath(candidate)
     const runtimeBinary = runtimeStatus.binaryPath
-      ? resolve(runtimeStatus.binaryPath)
+      ? await canonicalizeExistingPath(runtimeStatus.binaryPath).catch(
+          () => undefined
+        )
       : undefined
-    if (candidate === runtimeBinary) {
+    if (canonicalCandidate === runtimeBinary) {
       shell.showItemInFolder(candidate)
       return
     }
-    if (!store.isAllowedPath(candidate) && !allowedAttachmentPaths.has(candidate)) {
+    const inWorkspace = await isPathInsideCanonicalRoots(
+      canonicalCandidate,
+      store.listProjects().map((project) => project.path)
+    )
+    if (
+      !inWorkspace &&
+      !allowedAttachmentPaths.has(canonicalCandidate)
+    ) {
       throw new Error('The requested path is outside the approved workspaces.')
     }
-    const failure = await shell.openPath(candidate)
+    const failure = await shell.openPath(canonicalCandidate)
     if (failure) throw new Error(failure)
   })
 
@@ -675,7 +722,14 @@ async function handleHostRequest(
       return { items }
     }
     case 'inbox.dismiss': {
-      const items = await store.dismissInbox(expectIdentifier(record.id, 'id'))
+      const id = expectIdentifier(record.id, 'id')
+      const item = store.listInbox().find((entry) => entry.id === id)
+      if (item?.type === 'permission') {
+        throw new Error(
+          'Pending approvals must be reviewed or stopped; they cannot be dismissed.'
+        )
+      }
+      const items = await store.dismissInbox(id)
       emit({ type: 'inbox.updated', payload: items })
       return { items }
     }
@@ -688,6 +742,7 @@ async function handleHostRequest(
             kind: 'grok-acp',
             authOwner: 'grok-cli',
             state: runtimeStatus.state,
+            verified: Boolean(runtimeStatus.acpVerified),
             version: runtimeStatus.version,
             binaryPath: runtimeStatus.binaryPath,
             models: availableModels
@@ -856,7 +911,7 @@ async function importPastedAttachment(
   await mkdir(directory, { recursive: true })
   const path = join(directory, `${randomUUID()}.${extension}`)
   await writeFile(path, bytes, { mode: 0o600 })
-  allowedAttachmentPaths.add(path)
+  allowedAttachmentPaths.add(await canonicalizeExistingPath(path))
   return {
     id: randomUUID(),
     name: safeName || `pasted-image.${extension}`,
@@ -1002,11 +1057,11 @@ type PromptInput = {
   permissionMode: PermissionMode
 }
 
-function parsePromptInput(input: unknown): PromptInput {
+async function parsePromptInput(input: unknown): Promise<PromptInput> {
   const record = expectRecord(input)
   const taskId = expectIdentifier(record.taskId, 'taskId')
   const text = expectString(record.text, 'text', true).slice(0, 1_000_000)
-  const attachments = parseAttachments(record.attachments)
+  const attachments = await parseAttachments(record.attachments)
   if (!text.trim() && attachments.length === 0) {
     throw new Error('A prompt must include text or an attachment.')
   }
@@ -1025,31 +1080,61 @@ function parsePromptInput(input: unknown): PromptInput {
   }
 }
 
-function parseAttachments(value: unknown): AttachmentRecord[] {
+async function parseAttachments(value: unknown): Promise<AttachmentRecord[]> {
   if (!Array.isArray(value)) throw new Error('attachments must be an array.')
   if (value.length > 20) throw new Error('At most 20 attachments are allowed.')
 
-  return value.map((entry) => {
+  return Promise.all(value.map(async (entry) => {
     const record = expectRecord(entry)
     const filePath = resolve(expectString(record.path, 'attachment.path'))
-    if (!store.isAllowedPath(filePath) && !allowedAttachmentPaths.has(filePath)) {
+    const canonicalPath = await canonicalizeExistingPath(filePath)
+    const inWorkspace = await isPathInsideCanonicalRoots(
+      canonicalPath,
+      store.listProjects().map((project) => project.path)
+    )
+    if (!inWorkspace && !allowedAttachmentPaths.has(canonicalPath)) {
       throw new Error('An attachment is outside the approved workspaces.')
     }
     return {
       id: optionalString(record.id, 'attachment.id'),
       name: expectString(record.name, 'attachment.name').slice(0, 240),
-      path: filePath,
+      path: canonicalPath,
       mimeType: optionalString(record.mimeType, 'attachment.mimeType'),
       size: typeof record.size === 'number' ? record.size : undefined
     }
-  })
+  }))
 }
 
 async function sendPrompt(input: PromptInput): Promise<void> {
   const task = store.getTask(input.taskId)
   if (!task) throw new Error('Task does not exist.')
+  if (
+    pendingAssistants.has(task.id) ||
+    ['starting', 'running', 'waiting'].includes(task.status)
+  ) {
+    throw new Error(
+      task.status === 'waiting'
+        ? 'This task is waiting for approval. Review or stop it before sending another prompt.'
+        : 'This task is already running. Stop it before sending another prompt.'
+    )
+  }
   const project = store.getProject(task.projectId)
   if (!project) throw new Error('Task workspace does not exist.')
+
+  const acp = await getManager()
+  if (!connectedTasks.has(task.id)) {
+    await acp.connect({
+      taskId: task.id,
+      cwd: project.path,
+      executablePath: store.getSettings().grokPath || undefined,
+      model: input.model || undefined,
+      permissionMode: mapPermissionMode(input.permissionMode),
+      existingSessionId: task.sessionId,
+      rules: integrations.memoryRules(task.projectId),
+      mcpServers: integrations.enabledMcpServers()
+    })
+    connectedTasks.add(task.id)
+  }
 
   const now = new Date().toISOString()
   const userMessage: MessageRecord = {
@@ -1102,21 +1187,6 @@ async function sendPrompt(input: PromptInput): Promise<void> {
         : task.title
   })
 
-  const acp = await getManager()
-  if (!connectedTasks.has(task.id)) {
-    await acp.connect({
-      taskId: task.id,
-      cwd: project.path,
-      executablePath: store.getSettings().grokPath || undefined,
-      model: input.model || undefined,
-      permissionMode: mapPermissionMode(input.permissionMode),
-      existingSessionId: task.sessionId,
-      rules: integrations.memoryRules(task.projectId),
-      mcpServers: integrations.enabledMcpServers()
-    })
-    connectedTasks.add(task.id)
-  }
-
   await acp.prompt({
     taskId: task.id,
     text: input.text,
@@ -1132,10 +1202,12 @@ async function sendPrompt(input: PromptInput): Promise<void> {
   })
 }
 
-function mapPermissionMode(mode: PermissionMode): 'ask' | 'auto-approve' {
-  // ACP currently exposes a binary permission boundary. Keep accept-edits on the
-  // safe side because it cannot distinguish a file edit from a shell command.
-  return mode === 'full-access' ? 'auto-approve' : 'ask'
+function mapPermissionMode(
+  mode: PermissionMode
+): 'ask' | 'auto-approve-edits' | 'auto-approve' {
+  if (mode === 'full-access') return 'auto-approve'
+  if (mode === 'accept-edits') return 'auto-approve-edits'
+  return 'ask'
 }
 
 async function handleAcpEvent(event: GrokAcpEvent): Promise<void> {
@@ -1164,6 +1236,12 @@ async function handleAcpEvent(event: GrokAcpEvent): Promise<void> {
     }
     case 'ready':
       connectedTasks.add(taskId)
+      runtimeStatus = {
+        ...runtimeStatus,
+        state: 'ready',
+        acpVerified: true
+      }
+      emit({ type: 'runtime.status', payload: runtimeStatus })
       availableModels = event.payload.models.map((model) => model.id)
       emit({ type: 'models.updated', payload: availableModels })
       await updateTaskAndEmit(taskId, {
@@ -1198,6 +1276,7 @@ async function handleAcpEvent(event: GrokAcpEvent): Promise<void> {
         })),
         createdAt: new Date(event.timestamp).toISOString()
       }
+      pendingPermissionRequests.set(event.payload.requestId, permissionPayload)
       emit({
         type: 'permission.request',
         taskId,
@@ -1217,12 +1296,14 @@ async function handleAcpEvent(event: GrokAcpEvent): Promise<void> {
       })
       notifyWhenBackground(
         'Grok needs approval',
-        event.payload.summary || event.payload.toolName
+        'Open Nolira Build to review the requested action.'
       )
       return
     }
     case 'completed':
+      await disconnectTask(taskId)
       await finishAssistant(taskId, 'completed')
+      await clearPendingPermissionsForTask(taskId)
       if (store.getTask(taskId)?.automationId) {
         const automation = integrations.getAutomation(
           store.getTask(taskId)!.automationId!
@@ -1240,18 +1321,22 @@ async function handleAcpEvent(event: GrokAcpEvent): Promise<void> {
       }
       notifyWhenBackground(
         'Grok task completed',
-        store.getTask(taskId)?.title ?? 'Your task is ready.'
+        'Open Nolira Build to review the result.'
       )
       return
     case 'cancelled':
+      await disconnectTask(taskId)
       await finishAssistant(taskId, 'idle')
+      await clearPendingPermissionsForTask(taskId)
       return
     case 'error':
+      await disconnectTask(taskId)
       await appendAssistantError(taskId, event.payload.message)
       await updateTaskAndEmit(taskId, {
         status: 'error',
         error: event.payload.message
       })
+      await clearPendingPermissionsForTask(taskId)
       emit({
         type: 'inbox.updated',
         payload: await store.addInbox({
@@ -1328,7 +1413,7 @@ async function handleAcpEvent(event: GrokAcpEvent): Promise<void> {
         emit({ type: 'inbox.updated', payload: inbox })
         notifyWhenBackground(
           isMonitor ? 'Monitor update' : 'Background task completed',
-          body ?? event.payload.id
+          'Open Nolira Build to review the update.'
         )
       }
       return
@@ -1348,10 +1433,15 @@ async function appendAssistantDelta(
   if (!pending) return
   const partId = type === 'text' ? pending.textPartId : pending.thinkingPartId
 
-  await store.updateMessage(taskId, pending.messageId, (message) => {
-    const part = message.parts.find((entry) => entry.id === partId)
-    if (part?.type === type) part.text += delta
-  })
+  await store.updateMessage(
+    taskId,
+    pending.messageId,
+    (message) => {
+      const part = message.parts.find((entry) => entry.id === partId)
+      if (part?.type === type) part.text += delta
+    },
+    { deferPersist: true }
+  )
 
   emit({
     type: 'message.delta',
@@ -1428,6 +1518,38 @@ async function finishAssistant(
   await updateTaskAndEmit(taskId, { status: taskStatus })
 }
 
+async function clearPendingPermissionsForTask(taskId: string): Promise<void> {
+  const requestIds = new Set(
+    [...pendingPermissionRequests.values()]
+      .filter((request) => request.taskId === taskId)
+      .map((request) => request.id)
+  )
+  const cleared = await store.clearPermissionInboxForTask(taskId)
+  for (const requestId of cleared.requestIds) requestIds.add(requestId)
+
+  for (const requestId of requestIds) {
+    pendingPermissionRequests.delete(requestId)
+    emit({
+      type: 'permission.resolved',
+      taskId,
+      payload: { requestId }
+    })
+  }
+  if (requestIds.size > 0) {
+    emit({ type: 'inbox.updated', payload: cleared.items })
+  }
+}
+
+async function disconnectTask(taskId: string): Promise<void> {
+  connectedTasks.delete(taskId)
+  if (!manager) return
+  try {
+    await manager.disconnect(taskId)
+  } catch (error) {
+    console.warn(`Unable to release Grok ACP task ${taskId}.`, error)
+  }
+}
+
 async function updateTaskAndEmit(
   taskId: string,
   patch: Partial<Omit<TaskRecord, 'id' | 'projectId' | 'createdAt'>>
@@ -1475,6 +1597,13 @@ function parseSettingsPatch(input: unknown): Partial<AppSettingsRecord> {
   }
   if ('theme' in record) {
     patch.theme = expectEnum(record.theme, ['system', 'light', 'dark'], 'theme')
+  }
+  if ('accent' in record) {
+    patch.accent = expectEnum(
+      record.accent,
+      ['ember', 'blue', 'violet', 'mint'],
+      'accent'
+    )
   }
   if ('showActivityPanel' in record) {
     patch.showActivityPanel = expectBoolean(
@@ -1598,6 +1727,7 @@ async function start(): Promise<void> {
   const userDataPath = app.getPath('userData')
   store = new DesktopStore(join(userDataPath, 'desktop-state.json'))
   await store.load()
+  await store.recoverInterruptedTasks()
   integrations = new IntegrationStore(join(userDataPath, 'integrations.json'))
   await integrations.load()
   sessionIndex = new SessionIndexService({
@@ -1640,8 +1770,22 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (gracefulShutdownComplete) return
+  event.preventDefault()
+  if (gracefulShutdownStarted) return
+  gracefulShutdownStarted = true
   if (automationTimer) clearInterval(automationTimer)
   automationTimer = undefined
-  void shutdownManager()
+  void (async () => {
+    try {
+      await shutdownManager()
+      await store?.flush()
+    } catch (error) {
+      console.warn('Unable to finish graceful shutdown.', error)
+    } finally {
+      gracefulShutdownComplete = true
+      app.quit()
+    }
+  })()
 })
