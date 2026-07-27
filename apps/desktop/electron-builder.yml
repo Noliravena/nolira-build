@@ -25,6 +25,7 @@ asarUnpack:
   - "**/resources/runtime/**"
 
 artifactName: "${productName}-${version}-${os}-${arch}.${ext}"
+afterPack: scripts/after-pack.cjs
 
 mac:
   icon: resources/installer/icon.icns
@@ -41,9 +42,6 @@ mac:
   hardenedRuntime: true
   gatekeeperAssess: false
 
-dmg:
-  sign: false
-
 win:
   icon: resources/installer/icon.ico
   target:
@@ -54,7 +52,7 @@ win:
     - target: portable
       arch:
         - x64
-  verifyUpdateCodeSignature: false
+  verifyUpdateCodeSignature: true
 
 nsis:
   oneClick: false
