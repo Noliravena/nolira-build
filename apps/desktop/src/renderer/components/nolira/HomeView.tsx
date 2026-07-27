@@ -127,138 +127,152 @@ export function HomeView({
   ]
 
   return (
-    <main className="nol-home">
-      <h1 className="nol-greeting">{greetingLabel()}</h1>
-
-      <Composer
-        apiAvailable={apiAvailable}
-        busy={false}
-        initialText={starterText}
-        models={models}
-        onCreateTask={(projectId) =>
-          onCreateTask(projectId ?? selectedProject?.id)
-        }
-        onSendError={onSendError}
-        project={selectedProject}
-        settings={settings}
-        task={null}
-        variant="home"
-      />
-
-      <div className="nol-home-toolbar">
-        {projects.length > 0 && (
-          <Menu
-            ariaLabel="Active project"
-            drop="down"
-            icon="folder"
-            minWidth={290}
-            mono
-            onSelect={onSelectProject}
-            options={projects.map((project) => ({
-              value: project.id,
-              label: project.name,
-              icon: "folder" as const,
-            }))}
-            value={selectedProject?.id}
-            variant="box"
-          />
-        )}
-        <button type="button" className="nol-ghost-btn" onClick={onAddProject}>
-          <Icon name="folder-plus" size={16} />
-          <span>Add project</span>
-        </button>
-        <div className="nol-flex1" />
-        <div className="nol-chip-row">
-          {chips.map((chip) => (
+    <main className="nol-home" data-empty={isEmpty}>
+      <div className="nol-home-body">
+        <div className="nol-home-toolbar">
+          <div className="nol-home-toolbar-start">
+            {projects.length > 0 && (
+              <Menu
+                ariaLabel="Active project"
+                drop="down"
+                icon="folder"
+                minWidth={290}
+                mono
+                onSelect={onSelectProject}
+                options={projects.map((project) => ({
+                  value: project.id,
+                  label: project.name,
+                  icon: "folder" as const,
+                }))}
+                value={selectedProject?.id}
+                variant="box"
+              />
+            )}
             <button
               type="button"
-              className="nol-chip"
-              data-active={filter === chip.key}
-              key={chip.key}
-              onClick={() => setFilter(chip.key)}
+              className="nol-ghost-btn"
+              onClick={onAddProject}
             >
-              <span>{chip.label}</span>
-              <span className="nol-chip-count">{chip.count}</span>
+              <Icon name="folder-plus" size={16} />
+              <span>Add project</span>
             </button>
-          ))}
-        </div>
-        <div className="nol-viewtoggle">
-          <button
-            type="button"
-            title="Grid"
-            aria-label="Grid view"
-            data-active={view === "grid"}
-            onClick={() => onViewChange("grid")}
-          >
-            <Icon name="grid" size={16} />
-          </button>
-          <button
-            type="button"
-            title="Board"
-            aria-label="Board view"
-            data-active={view === "board"}
-            onClick={() => onViewChange("board")}
-          >
-            <Icon name="board" size={16} />
-          </button>
-        </div>
-        <button
-          type="button"
-          className="nol-square-btn"
-          title="Refresh sessions"
-          aria-label="Refresh sessions"
-          onClick={() => void refresh()}
-        >
-          <Icon className={spinning ? "nol-spin" : ""} name="refresh" size={17} />
-        </button>
-      </div>
-
-      {isEmpty ? (
-        <div className="nol-empty">
-          <Icon name="spark" size={30} />
-          <div className="nol-empty-title">No agents in this workspace yet</div>
-          <div className="nol-empty-sub">
-            Describe a change above, or start from one of these.
           </div>
-          <div className="nol-starters">
-            {STARTERS.map((starter) => (
+          <div className="nol-flex1" />
+          <div className="nol-home-toolbar-end">
+            <div className="nol-chip-row">
+              {chips.map((chip) => (
+                <button
+                  type="button"
+                  className="nol-chip"
+                  data-active={filter === chip.key}
+                  key={chip.key}
+                  onClick={() => setFilter(chip.key)}
+                >
+                  <span>{chip.label}</span>
+                  <span className="nol-chip-count">{chip.count}</span>
+                </button>
+              ))}
+            </div>
+            <div className="nol-viewtoggle">
               <button
                 type="button"
-                className="nol-starter"
-                key={starter.kind}
-                onClick={() => setStarterText(starter.text)}
+                title="Grid"
+                aria-label="Grid view"
+                data-active={view === "grid"}
+                onClick={() => onViewChange("grid")}
               >
-                <div className="nol-starter-kind">{starter.kind}</div>
-                <div className="nol-starter-text">{starter.text}</div>
+                <Icon name="grid" size={16} />
               </button>
-            ))}
+              <button
+                type="button"
+                title="Board"
+                aria-label="Board view"
+                data-active={view === "board"}
+                onClick={() => onViewChange("board")}
+              >
+                <Icon name="board" size={16} />
+              </button>
+            </div>
+            <button
+              type="button"
+              className="nol-square-btn"
+              title="Refresh sessions"
+              aria-label="Refresh sessions"
+              onClick={() => void refresh()}
+            >
+              <Icon
+                className={spinning ? "nol-spin" : ""}
+                name="refresh"
+                size={16}
+              />
+            </button>
           </div>
-          <button
-            type="button"
-            className="nol-primary-btn"
-            style={{ marginTop: 24 }}
-            onClick={onAddProject}
-          >
-            <Icon name="folder-plus" size={16} />
-            <span>Add project</span>
-          </button>
         </div>
-      ) : view === "grid" ? (
-        <GridSections
-          onCreateTask={onCreateTask}
-          projects={projects}
-          taskActions={taskActions}
-          tasks={visibleTasks}
-          allTasks={activeTasks}
+
+        {isEmpty ? (
+          <div className="nol-empty">
+            <h1 className="nol-greeting">{greetingLabel()}</h1>
+            <Icon name="spark" size={28} />
+            <div className="nol-empty-title">No agents in this workspace yet</div>
+            <div className="nol-empty-sub">
+              Describe a change below, or start from one of these.
+            </div>
+            <div className="nol-starters">
+              {STARTERS.map((starter) => (
+                <button
+                  type="button"
+                  className="nol-starter"
+                  key={starter.kind}
+                  onClick={() => setStarterText(starter.text)}
+                >
+                  <div className="nol-starter-kind">{starter.kind}</div>
+                  <div className="nol-starter-text">{starter.text}</div>
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              className="nol-primary-btn"
+              onClick={onAddProject}
+            >
+              <Icon name="folder-plus" size={16} />
+              <span>Add project</span>
+            </button>
+          </div>
+        ) : view === "grid" ? (
+          <GridSections
+            onCreateTask={onCreateTask}
+            projects={projects}
+            taskActions={taskActions}
+            tasks={visibleTasks}
+            allTasks={activeTasks}
+          />
+        ) : (
+          <BoardView
+            onCreateTask={() => void onCreateTask(selectedProject?.id)}
+            projects={projects}
+            taskActions={taskActions}
+            tasks={visibleTasks}
+          />
+        )}
+      </div>
+
+      <div className="nol-home-composer">
+        <Composer
+          apiAvailable={apiAvailable}
+          busy={false}
+          initialText={starterText}
+          models={models}
+          onCreateTask={(projectId) =>
+            onCreateTask(projectId ?? selectedProject?.id)
+          }
+          onSendError={onSendError}
+          project={selectedProject}
+          settings={settings}
+          task={null}
+          variant="home"
         />
-      ) : (
-        <BoardView
-          onCreateTask={() => void onCreateTask(selectedProject?.id)}
-          projects={projects}
-          taskActions={taskActions}
-          tasks={visibleTasks}
-        />
-      )}
+      </div>
     </main>
   )
 }
