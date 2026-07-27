@@ -1,10 +1,12 @@
-import { readFile, stat } from 'node:fs/promises'
+import { open, stat } from 'node:fs/promises'
 import { basename, extname, resolve } from 'node:path'
 
 import type { GrokPromptAttachment, GrokPromptRequest, JsonValue } from '../../shared/acp'
 import { GrokAcpError } from './errors'
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
+const MAX_TEXT_BYTES = 8 * 1024 * 1024
+const MAX_TOTAL_INLINE_BYTES = 24 * 1024 * 1024
 const MAX_TEXT_CHARACTERS = 200_000
 
 export interface BuildPromptBlocksOptions {
@@ -21,6 +23,7 @@ export async function buildPromptBlocks(
   if (text) blocks.push({ type: 'text', text })
 
   const pathNotes: string[] = []
+  let inlineBytes = 0
   for (const attachment of request.attachments ?? []) {
     const absolutePath = resolve(attachment.path)
     const metadata = await fileMetadata(absolutePath, attachment)
@@ -31,12 +34,14 @@ export async function buildPromptBlocks(
         continue
       }
 
-      const bytes = await readFile(absolutePath)
-      if (bytes.byteLength > MAX_IMAGE_BYTES) {
+      if (metadata.size > MAX_IMAGE_BYTES) {
         throw new GrokAcpError(
           `Attachment is larger than 8 MB: ${metadata.name}`,
         )
       }
+      const bytes = await readFileWithinLimit(absolutePath, MAX_IMAGE_BYTES)
+      inlineBytes += bytes.byteLength
+      enforceTotalInlineLimit(inlineBytes)
       blocks.push({
         type: 'image',
         mimeType: metadata.mimeType,
@@ -46,7 +51,15 @@ export async function buildPromptBlocks(
     }
 
     if (isTextAttachment(absolutePath, metadata.mimeType)) {
-      const content = await readFile(absolutePath, 'utf8')
+      if (metadata.size > MAX_TEXT_BYTES) {
+        throw new GrokAcpError(
+          `Text attachment is larger than 8 MB: ${metadata.name}`,
+        )
+      }
+      const bytes = await readFileWithinLimit(absolutePath, MAX_TEXT_BYTES)
+      inlineBytes += bytes.byteLength
+      enforceTotalInlineLimit(inlineBytes)
+      const content = bytes.toString('utf8')
       const clipped = content.length > MAX_TEXT_CHARACTERS
         ? `${content.slice(0, MAX_TEXT_CHARACTERS)}\n\n… [truncated, ${content.length} characters total]`
         : content
@@ -75,6 +88,39 @@ export async function buildPromptBlocks(
   return blocks
 }
 
+function enforceTotalInlineLimit(bytes: number): void {
+  if (bytes > MAX_TOTAL_INLINE_BYTES) {
+    throw new GrokAcpError('Inline attachments exceed the 24 MB total limit.')
+  }
+}
+
+async function readFileWithinLimit(
+  path: string,
+  limit: number
+): Promise<Buffer> {
+  const handle = await open(path, 'r')
+  const buffer = Buffer.allocUnsafe(limit + 1)
+  let offset = 0
+  try {
+    while (offset < buffer.byteLength) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        offset,
+        buffer.byteLength - offset,
+        offset
+      )
+      if (bytesRead === 0) break
+      offset += bytesRead
+    }
+  } finally {
+    await handle.close()
+  }
+  if (offset > limit) {
+    throw new GrokAcpError('Attachment changed while reading and exceeds 8 MB.')
+  }
+  return buffer.subarray(0, offset)
+}
+
 async function fileMetadata(path: string, attachment: GrokPromptAttachment) {
   let fileStat
   try {
@@ -87,6 +133,7 @@ async function fileMetadata(path: string, attachment: GrokPromptAttachment) {
   return {
     name: attachment.name?.trim() || basename(path),
     mimeType: attachment.mimeType?.trim() || inferMimeType(path),
+    size: fileStat.size,
   }
 }
 
