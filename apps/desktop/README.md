@@ -12,6 +12,12 @@ Electron 39 + React 19 desktop workspace for Grok ACP. The product shell follows
 
 The account and credential boundary intentionally remains with the Grok CLI. Nolira Build does not duplicate an OAuth session or store a second plaintext API key in renderer-managed settings.
 
+`Ask first` surfaces every ACP approval. `Auto-edit` automatically accepts only
+recognized file-edit tools and continues to ask for shell commands or unknown
+actions. `Full access` asks the CLI to bypass per-action approval. Grok still
+runs with the current operating-system account permissions; it is not an OS
+sandbox.
+
 ## Local development
 
 From the repository root:
@@ -30,9 +36,20 @@ temporary directory before starting the development app.
 
 ## Security boundary
 
-The renderer has `contextIsolation` enabled, Node integration disabled, and a sandboxed preload. It can access native capabilities only through the allow-listed `window.nolira` bridge. Navigation, new-window requests, external URL opening, filesystem dialogs, and ACP process control are validated in the main process.
+The renderer has `contextIsolation` enabled, Node integration disabled, and a
+sandboxed preload. It can access native capabilities only through the
+allow-listed `window.nolira` bridge. A packaged build always loads its bundled
+renderer; development URLs are limited to loopback HTTP(S). Navigation,
+new-window requests, external URL opening, filesystem dialogs, and ACP process
+control are validated in the main process.
 
-Workspace file APIs resolve symlinks and reject paths outside an approved repository. Writes carry the last observed modification time and fail on concurrent changes instead of silently overwriting them. Persistent integration files are written atomically with owner-only permissions.
+Workspace file and open-path APIs resolve symlinks and reject paths outside an
+approved repository. Writes carry the last observed modification time and fail
+on concurrent changes instead of silently overwriting them. Persistent
+integration files are written atomically with owner-only permissions.
+
+Selected text and image attachments are limited to 8 MB per inline file and 24
+MB total per prompt. Other file types are passed as approved on-disk paths.
 
 ## Packaging
 
@@ -45,3 +62,13 @@ pnpm --filter @nolira-build/desktop dist:linux
 Configured outputs are DMG/ZIP on macOS, NSIS/portable on Windows, and AppImage/DEB on Linux. Cross-building platform installers is not guaranteed; release CI should build and sign each target on its native runner.
 
 The optional `resources/runtime` directory is copied into packaged applications. Do not distribute a Grok binary there until licensing, platform signing, and update responsibilities are confirmed.
+
+The application reports `CLI detected` after a binary version check and `ACP
+verified` only after a task successfully completes the ACP connection
+handshake. Recurring automations are in-process timers and run only while the
+desktop application is open.
+
+See the repository-level
+[production release checklist](../../docs/RELEASE_CHECKLIST.md). The current
+tree intentionally contains no signing credentials, update-provider choice, or
+permission to redistribute Grok; those remain explicit public-release gates.
