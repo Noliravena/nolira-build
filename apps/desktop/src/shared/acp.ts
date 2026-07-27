@@ -12,7 +12,10 @@ export type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue }
 
-export type GrokPermissionMode = 'ask' | 'auto-approve'
+export type GrokPermissionMode =
+  | 'ask'
+  | 'auto-approve-edits'
+  | 'auto-approve'
 export type GrokReasoningEffort = 'low' | 'medium' | 'high' | 'max'
 export type GrokPermissionDecision = 'allow-once' | 'allow-session' | 'deny'
 
@@ -123,6 +126,7 @@ export interface GrokPermissionRequest {
   sessionId?: string
   toolCallId?: string
   toolName: string
+  toolKind?: string
   summary: string
   detail?: string
   options: GrokPermissionOption[]

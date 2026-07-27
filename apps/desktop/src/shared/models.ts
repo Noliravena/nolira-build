@@ -111,6 +111,7 @@ export interface ProviderSummary {
   kind: 'grok-acp'
   authOwner: 'grok-cli'
   state: RuntimeStatus['state']
+  verified: boolean
   version?: string
   binaryPath?: string
   models: string[]
@@ -218,6 +219,7 @@ export interface AppSettings {
 
 export interface RuntimeStatus {
   state: 'checking' | 'ready' | 'offline' | 'error'
+  acpVerified?: boolean
   version?: string
   message?: string
   binaryPath?: string
@@ -250,6 +252,7 @@ export interface AppSnapshot {
   models?: string[]
   activeTaskId?: string | null
   inbox?: InboxItem[]
+  pendingPermissions?: PermissionRequest[]
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
