@@ -51,7 +51,7 @@ export function AppHeader({
           aria-label="Back to workspace"
           title="Back"
         >
-          <Icon name="arrow-left" size={18} />
+          <Icon name="arrow-left" size={16} />
         </button>
       )}
       <div
@@ -72,41 +72,43 @@ export function AppHeader({
         <span>{crumb}</span>
       </div>
       <div className="nol-flex1" />
-      <button type="button" className="nol-search-btn" onClick={onOpenSearch}>
-        <Icon name="search" size={15} />
-        <span>Search</span>
-        <span className="nol-kbd">{modKey}</span>
-      </button>
-      <button
-        type="button"
-        className="nol-icon-btn"
-        onClick={onOpenInbox}
-        aria-label="Inbox"
-        title="Inbox"
-      >
-        <Icon name="bell" size={18} />
-        {hasUnreadInbox && <span className="nol-badge-dot" />}
-      </button>
-      <button
-        type="button"
-        className="nol-icon-btn"
-        onClick={onToggleTheme}
-        aria-label="Toggle theme"
-        title="Toggle theme"
-      >
-        <Icon name={theme === "dark" ? "moon" : "sun"} size={17} />
-      </button>
-      <button
-        type="button"
-        className="nol-icon-btn"
-        onClick={onOpenSettings}
-        aria-label="Settings"
-        title={mac ? "Settings ⌘," : "Settings Ctrl+,"}
-      >
-        <Icon name="sliders" size={18} />
-      </button>
-      <div className="nol-avatar" aria-hidden="true">
-        NV
+      <div className="nol-header-actions">
+        <button type="button" className="nol-search-btn" onClick={onOpenSearch}>
+          <Icon name="search" size={15} />
+          <span>Search</span>
+          <span className="nol-kbd">{modKey}</span>
+        </button>
+        <button
+          type="button"
+          className="nol-icon-btn"
+          onClick={onOpenInbox}
+          aria-label="Inbox"
+          title="Inbox"
+        >
+          <Icon name="bell" size={15} />
+          {hasUnreadInbox && <span className="nol-badge-dot" />}
+        </button>
+        <button
+          type="button"
+          className="nol-icon-btn"
+          onClick={onToggleTheme}
+          aria-label="Toggle theme"
+          title="Toggle theme"
+        >
+          <Icon name={theme === "dark" ? "moon" : "sun"} size={15} />
+        </button>
+        <button
+          type="button"
+          className="nol-icon-btn"
+          onClick={onOpenSettings}
+          aria-label="Settings"
+          title={mac ? "Settings ⌘," : "Settings Ctrl+,"}
+        >
+          <Icon name="sliders" size={15} />
+        </button>
+        <div className="nol-avatar" aria-hidden="true">
+          NV
+        </div>
       </div>
       {showWinControls && (
         <div
@@ -206,13 +208,15 @@ export function StatusFooter({
         />
         {runtimeLabel}
       </span>
-      <span className="nol-footer-path">{path}</span>
+      {path ? <span className="nol-footer-path">{path}</span> : null}
       <div className="nol-flex1" />
-      <span>
-        {runningCount} running · {reviewCount} to review
-      </span>
-      <span>{model}</span>
-      <span>{isMac(platform) ? "⌘K" : "Ctrl K"}</span>
+      <div className="nol-footer-meta">
+        <span>
+          {runningCount} running · {reviewCount} to review
+        </span>
+        <span>{model}</span>
+        <span>{isMac(platform) ? "⌘K" : "Ctrl K"}</span>
+      </div>
     </footer>
   )
 }

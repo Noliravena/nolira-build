@@ -163,11 +163,13 @@ function windowOptions(): BrowserWindowConstructorOptions {
   }
 
   if (process.platform === 'darwin') {
+    // Topnav is 40px (--nol-topbar-h). Traffic lights are ~12px tall;
+    // y:14 centers them on the same axis as the header content.
     return {
       ...common,
       frame: true,
       titleBarStyle: 'hiddenInset',
-      trafficLightPosition: { x: 14, y: 12 },
+      trafficLightPosition: { x: 14, y: 14 },
       transparent: false,
       hasShadow: true,
       roundedCorners: true

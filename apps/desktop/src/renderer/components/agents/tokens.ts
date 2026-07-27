@@ -55,7 +55,7 @@ export const agentsTokens = {
   },
   layout: {
     sidebarWidth: 260,
-    topbarHeight: 40,
+    topbarHeight: 40, // keep in sync with --nol-topbar-h + trafficLightPosition
     composerMaxWidth: 840,
     controlHeight: 28,
     rowHeight: 32,
