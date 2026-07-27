@@ -163,7 +163,11 @@ export function SettingsDialog({
               />
               <span>
                 {runtime.version ?? "runtime"} ·{" "}
-                {runtime.state === "ready" ? "up" : runtime.state}
+                {runtime.state === "ready"
+                  ? runtime.acpVerified
+                    ? "ACP verified"
+                    : "CLI detected"
+                  : runtime.state}
               </span>
             </div>
           </nav>
@@ -209,7 +213,7 @@ export function SettingsDialog({
                     />
                   </SettingRow>
                   <SettingRow
-                    hint="Controls when an agent may write files or run shell commands."
+                    hint="Auto-edit approves recognized file edits only; shell commands still ask."
                     title="Permission mode"
                   >
                     <Menu
@@ -257,7 +261,9 @@ export function SettingsDialog({
                     />
                     <span>
                       {runtime.state === "ready"
-                        ? `Grok ACP runtime — connected`
+                        ? runtime.acpVerified
+                          ? "Grok ACP runtime — verified"
+                          : "Grok CLI detected — ACP not yet verified"
                         : runtime.state === "checking"
                           ? "Checking the Grok runtime…"
                           : "Grok runtime is unavailable"}
@@ -269,7 +275,7 @@ export function SettingsDialog({
                   </div>
                   <p>
                     {runtime.message ??
-                      "Agents run through a local ACP process per task. File writes and shell commands cross the isolated preload bridge and honor the permission mode."}
+                      "The CLI version check only confirms the binary is available. ACP is verified after a task connects successfully."}
                   </p>
                   {runtime.binaryPath && (
                     <div className="nol-runtime-actions">
@@ -313,10 +319,10 @@ export function SettingsDialog({
                 <div className="nol-settings-note">
                   <Icon name="shield" size={17} />
                   <p>
-                    Full access bypasses per-command approval inside the
-                    sandboxed runtime. The renderer never receives shell access
-                    or Node.js APIs — every action crosses the isolated preload
-                    bridge.
+                    Full access bypasses per-command approval. Grok runs with
+                    your operating-system account permissions; it is not an OS
+                    sandbox. The renderer remains isolated from shell and
+                    Node.js APIs.
                   </p>
                 </div>
               </>
@@ -703,12 +709,16 @@ function IntegrationsPane({
                     className="nol-integration-state"
                     style={{
                       color:
-                        provider.state === "ready"
+                        provider.state === "ready" && provider.verified
                           ? "var(--ok)"
                           : "var(--wr)",
                     }}
                   >
-                    {provider.state === "ready" ? "connected" : provider.state}
+                    {provider.state === "ready"
+                      ? provider.verified
+                        ? "ACP verified"
+                        : "CLI detected"
+                      : provider.state}
                   </span>
                 </div>
                 <div className="nol-integration-detail">

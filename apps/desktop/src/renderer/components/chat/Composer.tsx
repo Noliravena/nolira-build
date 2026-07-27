@@ -127,7 +127,11 @@ export function Composer({
   }, [fileMatches, skills, suggestionsDismissed, trigger])
 
   const busy =
-    busyProp || sending || task?.status === "running" || task?.status === "starting"
+    busyProp ||
+    sending ||
+    task?.status === "running" ||
+    task?.status === "starting" ||
+    task?.status === "waiting"
 
   useEffect(() => {
     onBusyChange?.(sending)
@@ -508,7 +512,11 @@ export function Composer({
           onSelect={(value) => setPermissionMode(value as PermissionMode)}
           options={[
             { value: "default", label: "Agent", hint: "ask first" },
-            { value: "accept-edits", label: "Auto edit", hint: "edits land" },
+            {
+              value: "accept-edits",
+              label: "Auto edit",
+              hint: "file edits only",
+            },
             { value: "full-access", label: "Full access", hint: "no prompts" },
           ]}
           value={permissionMode}

@@ -111,16 +111,20 @@ export function InboxDialog({
                       className="nol-btn-solid"
                       onClick={() => onOpenItem(item)}
                     >
-                      Open session
+                      {item.type === "permission"
+                        ? "Review approval"
+                        : "Open session"}
                     </button>
                   )}
-                  <button
-                    type="button"
-                    className="nol-btn-outline"
-                    onClick={() => onDismiss(item.id)}
-                  >
-                    Dismiss
-                  </button>
+                  {item.type !== "permission" && (
+                    <button
+                      type="button"
+                      className="nol-btn-outline"
+                      onClick={() => onDismiss(item.id)}
+                    >
+                      Dismiss
+                    </button>
+                  )}
                 </div>
               </div>
             )

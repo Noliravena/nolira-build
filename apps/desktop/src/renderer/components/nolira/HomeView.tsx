@@ -435,9 +435,10 @@ export function AgentCard({
   const [menuOpen, setMenuOpen] = useState(false)
   const status = cardStatus(task)
   const running = status === "running"
+  const stoppable = ["starting", "running", "waiting"].includes(task.status)
 
   const actions: ActionMenuAction[] = [{ id: "open", label: "Open session" }]
-  if (running) actions.push({ id: "stop", label: "Stop agent" })
+  if (stoppable) actions.push({ id: "stop", label: "Stop agent" })
   if (task.sessionId) {
     actions.push({ id: "rename", label: "Rename" })
     actions.push({ id: "export", label: "Export transcript" })

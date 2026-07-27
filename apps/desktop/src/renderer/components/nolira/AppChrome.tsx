@@ -65,7 +65,7 @@ export function AppHeader({
       >
         <span className="nol-logo-mark" />
         <span className="nol-logo-name">nolira</span>
-        <span className="nol-logo-sub">agents</span>
+        <span className="nol-logo-sub">build</span>
       </div>
       <div className="nol-header-divider" />
       <div className="nol-crumb">
@@ -183,14 +183,16 @@ export function StatusFooter({
   platform,
 }: StatusFooterProps) {
   const runtimeTone =
-    runtime.state === "ready"
+    runtime.state === "ready" && runtime.acpVerified
       ? "var(--ok)"
-      : runtime.state === "checking"
+      : runtime.state === "checking" || runtime.state === "ready"
         ? "var(--wr)"
         : "var(--dn)"
   const runtimeLabel =
     runtime.state === "ready"
-      ? `runtime up${runtime.version ? ` · ${runtime.version}` : ""}`
+      ? `${runtime.acpVerified ? "ACP verified" : "CLI detected"}${
+          runtime.version ? ` · ${runtime.version}` : ""
+        }`
       : runtime.state === "checking"
         ? "runtime starting…"
         : `runtime ${runtime.state}`

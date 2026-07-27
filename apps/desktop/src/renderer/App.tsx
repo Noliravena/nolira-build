@@ -13,6 +13,14 @@ import { SettingsDialog } from "./components/nolira/SettingsDialog"
 import { demoSnapshot } from "./lib/demoSnapshot"
 import { pathName } from "./lib/format"
 import { cardStatus } from "./lib/agentPresentation"
+import {
+  activePermission as getActivePermission,
+  createPermissionQueue,
+  deferPermission,
+  enqueuePermission,
+  openPermission,
+  resolvePermission,
+} from "./lib/permissionQueue"
 import { isMac } from "./lib/platform"
 import {
   applyMessageDelta,
@@ -24,7 +32,6 @@ import type {
   AgentEvent,
   AppSettings,
   InboxItem,
-  PermissionRequest,
   Project,
   RuntimeStatus,
   Task,
@@ -49,7 +56,9 @@ export function App() {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(
     api ? null : (demoSnapshot.activeTaskId ?? null),
   )
-  const [permission, setPermission] = useState<PermissionRequest | null>(null)
+  const [permissionQueue, setPermissionQueue] = useState(() =>
+    createPermissionQueue(),
+  )
   const [inbox, setInbox] = useState<InboxItem[]>([])
   const [screen, setScreen] = useState<Screen>("home")
   const [view, setView] = useState<HomeViewMode>("grid")
@@ -99,6 +108,9 @@ export function App() {
           setRuntime(event.payload.runtime)
           setModels(event.payload.models ?? [])
           setInbox(event.payload.inbox ?? [])
+          setPermissionQueue(
+            createPermissionQueue(event.payload.pendingPermissions ?? []),
+          )
           setActiveTaskId(
             event.payload.activeTaskId ?? event.payload.tasks[0]?.id ?? null,
           )
@@ -128,13 +140,15 @@ export function App() {
           )
           break
         case "permission.request":
-          setPermission(event.payload)
+          setPermissionQueue((current) =>
+            enqueuePermission(current, event.payload),
+          )
           setActiveTaskId(event.taskId)
           setScreen("session")
           break
         case "permission.resolved":
-          setPermission((current) =>
-            current?.id === event.payload.requestId ? null : current,
+          setPermissionQueue((current) =>
+            resolvePermission(current, event.payload.requestId),
           )
           break
         case "runtime.status":
@@ -175,6 +189,9 @@ export function App() {
         setRuntime(snapshot.runtime)
         setModels(snapshot.models ?? [])
         setInbox(snapshot.inbox ?? [])
+        setPermissionQueue(
+          createPermissionQueue(snapshot.pendingPermissions ?? []),
+        )
         setActiveTaskId(snapshot.activeTaskId ?? snapshot.tasks[0]?.id ?? null)
       })
       .catch((error: unknown) => {
@@ -505,6 +522,7 @@ export function App() {
   }, [createTask, platform])
 
   const unreadInbox = inbox.filter((item) => !item.read).length
+  const permission = getActivePermission(permissionQueue)
   const runningCount = tasks.filter(
     (task) => !task.archived && cardStatus(task) === "running",
   ).length
@@ -665,6 +683,20 @@ export function App() {
             }
             setInboxOpen(false)
             if (item.taskId) void selectTask(item.taskId)
+            if (item.type === "permission") {
+              if (
+                item.sourceId &&
+                permissionQueue.items.some(
+                  (request) => request.id === item.sourceId,
+                )
+              ) {
+                setPermissionQueue((current) =>
+                  openPermission(current, item.sourceId!),
+                )
+              } else {
+                showToast("This approval is no longer available")
+              }
+            }
           }}
           projects={projects}
           tasks={tasks}
@@ -701,10 +733,13 @@ export function App() {
         </div>
       )}
 
-      {permission && (
+      {permissionQueue.open && permission && (
         <PermissionDialog
           apiAvailable={Boolean(api)}
-          onClose={() => setPermission(null)}
+          key={permission.id}
+          onDefer={() =>
+            setPermissionQueue((current) => deferPermission(current))
+          }
           onError={showToast}
           request={permission}
         />

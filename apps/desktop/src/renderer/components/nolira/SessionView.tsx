@@ -71,7 +71,11 @@ export function SessionView({
     ? task.messages
     : [...task.messages, ...previewMessages]
   const busy =
-    composerSending || task.status === "running" || task.status === "starting"
+    composerSending ||
+    task.status === "running" ||
+    task.status === "starting" ||
+    task.status === "waiting"
+  const stoppable = ["starting", "running", "waiting"].includes(task.status)
   const status = cardStatus(task)
 
   useEffect(() => {
@@ -150,7 +154,7 @@ export function SessionView({
             >
               <Icon name="layout-right" size={16} />
             </button>
-            {status === "running" ? (
+            {stoppable ? (
               <button
                 type="button"
                 className="nol-outline-btn"
@@ -256,7 +260,9 @@ export function SessionView({
             <div className="nol-flex1" />
             <span className="nol-pane-meta">
               {runtime.state === "ready"
-                ? (runtime.version ?? "runtime up")
+                ? runtime.acpVerified
+                  ? (runtime.version ?? "ACP verified")
+                  : "CLI detected"
                 : runtime.state}
             </span>
           </div>

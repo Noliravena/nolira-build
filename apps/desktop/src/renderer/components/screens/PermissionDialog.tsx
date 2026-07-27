@@ -5,14 +5,14 @@ import type { PermissionRequest } from "../../types"
 export interface PermissionDialogProps {
   request: PermissionRequest
   apiAvailable: boolean
-  onClose: () => void
+  onDefer: () => void
   onError: (message: string) => void
 }
 
 export function PermissionDialog({
   request,
   apiAvailable,
-  onClose,
+  onDefer,
   onError,
 }: PermissionDialogProps) {
   const [submitting, setSubmitting] = useState<string | null>(null)
@@ -20,7 +20,7 @@ export function PermissionDialog({
   const respond = async (optionId: string) => {
     setSubmitting(optionId)
     if (!window.nolira) {
-      window.setTimeout(onClose, 250)
+      window.setTimeout(onDefer, 250)
       return
     }
     try {
@@ -28,7 +28,6 @@ export function PermissionDialog({
         requestId: request.id,
         optionId,
       })
-      onClose()
     } catch (error) {
       onError(error instanceof Error ? error.message : "Permission response failed")
       setSubmitting(null)
@@ -58,8 +57,9 @@ export function PermissionDialog({
           <button
             type="button"
             className="nol-dialog-close"
-            onClick={onClose}
-            aria-label="Dismiss"
+            onClick={onDefer}
+            aria-label="Review this approval later"
+            title="Review later"
           >
             <Icon name="close" size={15} />
           </button>
@@ -104,7 +104,7 @@ export function PermissionDialog({
               </button>
             ))}
             {!apiAvailable && (
-              <button type="button" data-kind="reject" onClick={onClose}>
+              <button type="button" data-kind="reject" onClick={onDefer}>
                 <span>
                   <strong>Close preview</strong>
                 </span>
